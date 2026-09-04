@@ -164,10 +164,10 @@ async def scrape_and_save():
     cur.execute("""
         CREATE TABLE IF NOT EXISTS foreign_keys (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            from_table TEXT,
-            from_field TEXT,
-            to_table TEXT,
-            to_field TEXT
+            source_table TEXT,
+            field TEXT,
+            ref_table TEXT,
+            ref_field TEXT
         )
     """)
     cur.execute("""
@@ -176,7 +176,7 @@ async def scrape_and_save():
             table_name TEXT,
             field_name TEXT,
             val TEXT,
-            text TEXT
+            description TEXT
         )
     """)
 
@@ -198,15 +198,15 @@ async def scrape_and_save():
 
             for pv in f.get("possible_values", []):
                 cur.execute("""
-                    INSERT INTO possible_values (table_name, field_name, val, text)
+                    INSERT INTO possible_values (table_name, field_name, val, description)
                     VALUES (?, ?, ?, ?)
-                """, (t_name, f["name"], pv["val"], pv["text"]))
+                """, (t_name, f["name"], pv["val"], pv.get("text", pv.get("desc", ""))))
 
         for fk in s.get("foreign_keys", []):
             cur.execute("""
                 INSERT INTO foreign_keys (source_table, field, ref_table, ref_field)
                 VALUES (?, ?, ?, ?)
-            """, (fk["from_table"], fk["from_field"], fk["to_table"], fk["to_field"]))
+            """, (t_name, fk.get("field", fk.get("from_field", "")), fk.get("ref_table", fk.get("to_table", "")), fk.get("ref_field", fk.get("to_field", ""))))
 
     conn.commit()
     total_fields = cur.execute("SELECT count(*) FROM fields").fetchone()[0]

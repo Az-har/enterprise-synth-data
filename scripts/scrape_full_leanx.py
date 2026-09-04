@@ -261,10 +261,10 @@ def save_to_database(full_schemas: Dict[str, Any], master_index: Dict[str, str])
     cur.execute("""
         CREATE TABLE foreign_keys (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            from_table TEXT,
-            from_field TEXT,
-            to_table TEXT,
-            to_field TEXT
+            source_table TEXT,
+            field TEXT,
+            ref_table TEXT,
+            ref_field TEXT
         )
     """)
     cur.execute("""
@@ -273,7 +273,7 @@ def save_to_database(full_schemas: Dict[str, Any], master_index: Dict[str, str])
             table_name TEXT,
             field_name TEXT,
             val TEXT,
-            text TEXT
+            description TEXT
         )
     """)
 
@@ -296,20 +296,20 @@ def save_to_database(full_schemas: Dict[str, Any], master_index: Dict[str, str])
 
             for pv in f.get("possible_values", []):
                 cur.execute("""
-                    INSERT INTO possible_values (table_name, field_name, val, text)
+                    INSERT INTO possible_values (table_name, field_name, val, description)
                     VALUES (?, ?, ?, ?)
-                """, (t_name, f["name"], pv["val"], pv["text"]))
+                """, (t_name, f["name"], pv["val"], pv.get("text", pv.get("desc", ""))))
 
         for fk in s.get("foreign_keys", []):
             cur.execute("""
-                INSERT INTO foreign_keys (from_table, from_field, to_table, to_field)
+                INSERT INTO foreign_keys (source_table, field, ref_table, ref_field)
                 VALUES (?, ?, ?, ?)
-            """, (fk["from_table"], fk["from_field"], fk["to_table"], fk["to_field"]))
+            """, (t_name, fk.get("field", fk.get("from_field", "")), fk.get("ref_table", fk.get("to_table", "")), fk.get("ref_field", fk.get("to_field", ""))))
 
     # Create search indexes
     cur.execute("CREATE INDEX idx_fields_table ON fields(table_name)")
-    cur.execute("CREATE INDEX idx_fk_from ON foreign_keys(from_table)")
-    cur.execute("CREATE INDEX idx_fk_to ON foreign_keys(to_table)")
+    cur.execute("CREATE INDEX idx_fk_source ON foreign_keys(source_table)")
+    cur.execute("CREATE INDEX idx_fk_ref ON foreign_keys(ref_table)")
     cur.execute("CREATE INDEX idx_pv_table_field ON possible_values(table_name, field_name)")
 
     conn.commit()

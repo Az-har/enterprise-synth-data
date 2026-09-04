@@ -40,18 +40,12 @@ class SAPCatalogManager:
             ]
 
     def get_table(self, table_name: str) -> Optional[TableSchema]:
-        """Loads complete TableSchema including fields, primary keys, and foreign keys."""
+        """Loads complete TableSchema including fields, primary keys, and foreign keys (100% offline)."""
         normalized_name = table_name.strip().upper()
         with self._get_conn() as conn:
             cur = conn.cursor()
             cur.execute("SELECT name, description, category, keys FROM tables WHERE UPPER(name) = ?", (normalized_name,))
             tbl_row = cur.fetchone()
-
-            if not tbl_row:
-                # Attempt on-demand schema caching if not pre-indexed
-                if self._fetch_and_cache_schema(normalized_name):
-                    cur.execute("SELECT name, description, category, keys FROM tables WHERE UPPER(name) = ?", (normalized_name,))
-                    tbl_row = cur.fetchone()
 
             if not tbl_row:
                 return None
@@ -65,25 +59,21 @@ class SAPCatalogManager:
             """, (tbl_row["name"],))
             field_rows = cur.fetchall()
 
-            if not field_rows:
-                # On-demand fetch and cache into SQLite
-                if self._fetch_and_cache_schema(tbl_row["name"]):
-                    cur.execute("""
-                        SELECT name, description, data_type, length, decimals, is_key, check_table
-                        FROM fields WHERE table_name = ?
-                    """, (tbl_row["name"],))
-                    field_rows = cur.fetchall()
+            # Batch query: Fetch all possible values for this table in a single query (resolves N+1 query issue DEF-10)
+            cur.execute("""
+                SELECT field_name, val, description FROM possible_values
+                WHERE table_name = ?
+            """, (tbl_row["name"],))
+            pv_by_field: Dict[str, List[PossibleValue]] = {}
+            for p in cur.fetchall():
+                fname = p["field_name"]
+                if fname not in pv_by_field:
+                    pv_by_field[fname] = []
+                pv_by_field[fname].append(PossibleValue(val=p["val"], desc=p["description"] or ""))
 
             fields: Dict[str, FieldMeta] = {}
             for f in field_rows:
-                # Get possible values for this field
-                cur.execute("""
-                    SELECT val, description FROM possible_values
-                    WHERE table_name = ? AND field_name = ?
-                """, (tbl_row["name"], f["name"]))
-                pv_rows = cur.fetchall()
-                possible_values = [PossibleValue(val=p["val"], desc=p["description"] or "") for p in pv_rows]
-
+                possible_values = pv_by_field.get(f["name"], [])
                 fields[f["name"]] = FieldMeta(
                     name=f["name"],
                     description=f["description"] or "",
@@ -158,111 +148,3 @@ class SAPCatalogManager:
 
             return tbl_results + field_results
 
-    def _fetch_and_cache_schema(self, table_name: str) -> bool:
-        """Fetches detailed schema on-demand from LeanX and caches it into SQLite."""
-        import re
-        import httpx
-        from bs4 import BeautifulSoup
-
-        try:
-            url = f"https://leanx.eu/sap/table/{table_name}/"
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-            }
-            r = httpx.get(url, headers=headers, follow_redirects=True, timeout=10)
-            if r.status_code != 200:
-                return False
-
-            soup = BeautifulSoup(r.text, "html.parser")
-            main_table = None
-            for t in soup.find_all("table"):
-                if t.get("class") == ["w-full"]:
-                    main_table = t
-                    break
-            if not main_table and soup.find_all("table"):
-                main_table = soup.find_all("table")[0]
-            if not main_table:
-                return False
-
-            tbody = main_table.find("tbody") or main_table
-            rows = tbody.find_all("tr", recursive=False)
-            fields = []
-            keys = []
-            foreign_keys = []
-
-            for row in rows:
-                tds = row.find_all("td", recursive=False)
-                if len(tds) < 5:
-                    continue
-                f_name_raw = tds[0].text.strip().replace("\n", " ").replace("\r", " ")
-                f_name = f_name_raw.split()[0].upper() if f_name_raw else ""
-                if not f_name or not re.match(r"^[A-Z0-9_]{1,30}$", f_name):
-                    continue
-
-                is_key = bool(tds[1].find("svg") or "key" in tds[1].text.lower())
-                if is_key:
-                    keys.append(f_name)
-
-                f_desc = tds[2].text.strip().replace("\n", " ")
-                f_type = tds[3].text.strip().upper()
-                f_len_str = tds[4].text.strip()
-                length = 10
-                decimals = 0
-                if "(" in f_len_str:
-                    m = re.search(r"(\d+)\s*\(\s*(\d+)\s*\)", f_len_str)
-                    if m:
-                        length = int(m.group(1))
-                        decimals = int(m.group(2))
-                else:
-                    m = re.search(r"\d+", f_len_str)
-                    if m:
-                        length = int(m.group(0))
-
-                check_table = ""
-                if len(tds) > 5:
-                    check_table = tds[5].text.strip().upper()
-                    if check_table and check_table != "-" and check_table != "NONE":
-                        foreign_keys.append((table_name, f_name, check_table, f_name))
-
-                fields.append((table_name, f_name, f_desc, f_type or "CHAR", length, decimals, is_key, check_table))
-
-            if not fields:
-                return False
-
-            with self._get_conn() as conn:
-                cur = conn.cursor()
-                p = table_name[:2]
-                cat = "Enterprise"
-                if p in ("BK", "BS", "SK", "TC"):
-                    cat = "Finance"
-                elif p in ("VB", "KN", "LI", "VT"):
-                    cat = "Sales & Logistics"
-                elif p in ("MA", "LF", "T0"):
-                    cat = "Materials & Master Data"
-                elif p in ("EK", "EB"):
-                    cat = "Procurement"
-                elif p in ("AU", "AF"):
-                    cat = "Production"
-                elif p in ("PA", "HR"):
-                    cat = "HR / HCM"
-                elif p in ("CO", "CS"):
-                    cat = "Controlling"
-
-                cur.execute("""
-                    INSERT OR REPLACE INTO tables (name, description, category, keys)
-                    VALUES (?, ?, ?, ?)
-                """, (table_name, f"SAP Table {table_name}", cat, ",".join(keys) if keys else "MANDT"))
-                for f in fields:
-                    cur.execute("""
-                        INSERT OR REPLACE INTO fields (table_name, name, description, data_type, length, decimals, is_key, check_table)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """, f)
-                for fk in foreign_keys:
-                    cur.execute("""
-                        INSERT INTO foreign_keys (source_table, field, ref_table, ref_field)
-                        VALUES (?, ?, ?, ?)
-                    """, fk)
-                conn.commit()
-            return True
-        except Exception:
-            return False

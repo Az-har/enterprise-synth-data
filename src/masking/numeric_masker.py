@@ -54,7 +54,7 @@ class NumericMasker:
         try:
             val = float(original_amount)
         except (ValueError, TypeError):
-            return 100.0
+            return 0.0
 
         if val == 0.0:
             return 0.0
@@ -62,10 +62,12 @@ class NumericMasker:
         sign = 1 if val > 0 else -1
         abs_val = abs(val)
 
-        # Shift by random factor between -perturbation_range and +perturbation_range
-        # Ensure minimum shift of at least 5% so it's noticeably different
+        # Fix DEF-07: Bound min_shift and max_shift so range is never inverted
+        p_range = max(0.001, abs(perturbation_range))
+        min_shift = min(0.05, p_range * 0.5)
+        max_shift = max(min_shift, p_range)
         direction = random.choice([-1, 1])
-        shift_pct = random.uniform(0.05, perturbation_range)
+        shift_pct = random.uniform(min_shift, max_shift)
         shifted_val = abs_val * (1.0 + (direction * shift_pct))
 
         return round(sign * shifted_val, 2)

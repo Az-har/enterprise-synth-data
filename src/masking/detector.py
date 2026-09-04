@@ -71,23 +71,25 @@ class SensitiveColumnDetector:
                     confidence = "HIGH"
                     break
 
-            # 2. If no strong match on header, inspect content samples
+            # 2. If no strong match on header, inspect content samples cell-by-cell (DEF-08: no cross-row bleed)
             if not detected_cat and not sample_df[col].empty:
-                non_null_samples = sample_df[col].dropna().astype(str).tolist()
-                if non_null_samples:
-                    sample_txt = " ".join(non_null_samples[:10])
+                non_null_samples = [str(v).strip() for v in sample_df[col].dropna() if str(v).strip()]
+                for sample_val_str in non_null_samples[:15]:
                     # Email check
-                    if "@" in sample_txt and re.search(r"[\w\.-]+@[\w\.-]+\.\w+", sample_txt):
+                    if "@" in sample_val_str and re.search(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$", sample_val_str):
                         detected_cat = "email"
                         confidence = "HIGH"
-                    # IBAN check
-                    elif re.search(r"\b[A-Z]{2}[0-9]{2}[A-Z0-9]{10,30}\b", sample_txt):
+                        break
+                    # IBAN check (strip spaces)
+                    elif re.search(r"^[A-Z]{2}[0-9]{2}[A-Z0-9]{10,30}$", sample_val_str.replace(" ", "").upper()):
                         detected_cat = "bank_iban"
                         confidence = "HIGH"
-                    # VAT check
-                    elif re.search(r"\b[A-Z]{2}[0-9]{8,12}\b", sample_txt):
+                        break
+                    # VAT check (strip spaces)
+                    elif re.search(r"^[A-Z]{2}[0-9]{8,12}$", sample_val_str.replace(" ", "").upper()):
                         detected_cat = "vat_tax_id"
                         confidence = "HIGH"
+                        break
 
             if detected_cat:
                 sample_val = None

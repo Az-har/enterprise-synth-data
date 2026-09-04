@@ -145,12 +145,10 @@ class DataMaskingEngine:
         custom_pools: Optional[Dict[str, List[str]]] = None,
         preview_rows: int = 5
     ) -> Dict[str, Dict[str, pd.DataFrame]]:
-        """
-        Generates a before vs after preview dictionary for the first N rows of each table.
-        Returns: {table_name: {"original": df_sample, "masked": df_masked_sample}}
-        """
+        # Use an isolated engine instance so 5-row preview never mutates production vault state or advances custom pool counters (DEF-06)
+        preview_engine = DataMaskingEngine(salt=self.vault.salt)
         sample_tables = {name: df.head(preview_rows).copy() for name, df in tables.items()}
-        masked_samples = self.mask_dataset(sample_tables, column_configs, custom_pools)
+        masked_samples = preview_engine.mask_dataset(sample_tables, column_configs, custom_pools)
         preview = {}
         for name in tables.keys():
             preview[name] = {
@@ -158,3 +156,4 @@ class DataMaskingEngine:
                 "masked": masked_samples[name]
             }
         return preview
+

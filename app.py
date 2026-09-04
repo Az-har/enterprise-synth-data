@@ -7,7 +7,7 @@ real-time audit diagnostics, format-preserving masking, and an embedded 42k SAP 
 import os
 import io
 import tempfile
-from typing import Dict, Any
+import uuid
 import pandas as pd
 from nicegui import ui
 
@@ -15,7 +15,7 @@ from src.catalog.sap_catalog import SAPCatalogManager
 from src.templates.template_generator import ExcelTemplateBuilder
 from src.templates.meta_prompt import MetaPromptGenerator
 from src.templates.excel_parser import FaultTolerantExcelParser
-from src.synthesis.generator import DataSynthesizer
+from src.synthesis import DataSynthesizer, sort_specs_topologically
 from src.masking.masking_engine import DataMaskingEngine
 
 
@@ -31,16 +31,13 @@ os.makedirs(TEMP_DIR, exist_ok=True)
 
 
 class StudioState:
-    """Centralized reactive state for the Enterprise Studio."""
+    """Session-isolated reactive state for the Enterprise Studio (DEF-01)."""
     def __init__(self):
         self.domain = "SAP"
         self.creation_specs = {}
         self.creation_dfs = {}
         self.uploaded_mask_tables = {}
         self.audit_report = None
-
-
-state = StudioState()
 
 
 def trigger_download(file_path: str, file_name: str):
@@ -58,6 +55,12 @@ def trigger_download(file_path: str, file_name: str):
 # ---------------------------------------------------------------------------
 @ui.page("/")
 def main_page():
+    # Session-isolated state & workspace directory per client connection (DEF-01, DEF-14)
+    state = StudioState()
+    session_id = uuid.uuid4().hex[:8]
+    session_dir = os.path.join(TEMP_DIR, session_id)
+    os.makedirs(session_dir, exist_ok=True)
+
     ui.add_head_html("""
         <style>
             body {
@@ -178,7 +181,7 @@ def main_page():
                             ui.label("Contains pre-configured 'Table_Definitions' and 'Field_Rules' sheets ready for immediate synthesis.").classes("text-xs text-slate-400 leading-relaxed")
 
                         def download_current_template():
-                            tpl_file = os.path.join(TEMP_DIR, f"{state.domain}_Data_Spec_Template.xlsx")
+                            tpl_file = os.path.join(session_dir, f"{state.domain}_Data_Spec_Template.xlsx")
                             template_builder.generate_template(tpl_file, domain=state.domain)
                             trigger_download(tpl_file, f"{state.domain}_Data_Spec_Template.xlsx")
                             ui.notify(f"Downloading {state.domain} template...", type="positive", position="top")
@@ -282,7 +285,7 @@ def main_page():
                         with audit_result_slot:
                             if not audit["valid"]:
                                 # Audit Failure Card
-                                tpl_file = os.path.join(TEMP_DIR, f"{state.domain}_Data_Spec_Template.xlsx")
+                                tpl_file = os.path.join(session_dir, f"{state.domain}_Data_Spec_Template.xlsx")
                                 with ui.card().classes("p-5 w-full bg-rose-950/40 border border-rose-800/70 rounded-xl shadow-xl gap-3"):
                                     with ui.row().classes("w-full items-center justify-between"):
                                         with ui.row().classes("items-center gap-2"):
@@ -338,27 +341,6 @@ def main_page():
             # -------------------------------------------------------------
             preview_slot = ui.column().classes("w-full gap-4")
 
-            def sort_specs_topologically(specs_dict: Dict[str, Any]) -> Dict[str, Any]:
-                """Ensures parent tables are generated before child tables in relational cascades."""
-                ordered = {}
-                remaining = dict(specs_dict)
-                max_iters = len(specs_dict) * 2
-                iters = 0
-                while remaining and iters < max_iters:
-                    iters += 1
-                    progress = False
-                    for t_name, spec in list(remaining.items()):
-                        parent = spec.parent_table
-                        if not parent or parent in ordered or parent not in specs_dict:
-                            ordered[t_name] = spec
-                            del remaining[t_name]
-                            progress = True
-                    if not progress:
-                        for t_name, spec in remaining.items():
-                            ordered[t_name] = spec
-                        break
-                return ordered
-
             def execute_live_preview(specs):
                 try:
                     ui.notify("Executing vectorized synthesis for preview...", type="info", position="top")
@@ -382,8 +364,8 @@ def main_page():
 
                     state.creation_dfs = preview_dfs
 
-                    # Export sample preview file
-                    sample_file = os.path.join(TEMP_DIR, "Sample_Data_Preview_5_Rows.xlsx")
+                    # Export sample preview file to session-isolated path (DEF-14)
+                    sample_file = os.path.join(session_dir, "Sample_Data_Preview_5_Rows.xlsx")
                     with pd.ExcelWriter(sample_file, engine="openpyxl") as writer:
                         for t_name, p_df in preview_dfs.items():
                             p_df.to_excel(writer, sheet_name=t_name[:31], index=False)
@@ -476,7 +458,7 @@ def main_page():
                             )
                             full_dfs[t_name] = parent_df
 
-                    out_path = os.path.join(TEMP_DIR, f"{state.domain}_Synthesized_Full_Dataset.xlsx")
+                    out_path = os.path.join(session_dir, f"{state.domain}_Synthesized_Full_Dataset.xlsx")
                     with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
                         for t_name, df_out in full_dfs.items():
                             df_out.to_excel(writer, sheet_name=t_name[:31], index=False)
@@ -549,38 +531,40 @@ def main_page():
 
                         state.uploaded_mask_tables = tables
                         ui.notify(f"Loaded {len(tables)} table(s) from '{file_name}'.", type="positive", position="top")
-                        render_mask_configuration(tables)
+                        suggestions = masking_engine.detect_sensitive_columns(tables)
+                        render_mask_configuration(tables, suggestions)
 
                     except Exception as ex:
                         ui.notify(f"Masking File Error: {str(ex)}", type="negative", position="top")
 
-                def render_mask_configuration(tables):
+                def render_mask_configuration(tables, suggestions):
                     mask_config_slot.clear()
-                    mask_preview_slot.clear()
+                    extra_select_widgets = {}
                     with mask_config_slot:
-                        with ui.card().classes("p-5 w-full bg-slate-900/80 border border-slate-800 rounded-xl gap-4"):
-                            ui.label("Auto-Detected Sensitive Attributes & Column Selection").classes("font-bold text-sm text-white")
-                            detection_results = masking_engine.detect_sensitive_columns(tables)
+                        with ui.card().classes("p-5 w-full bg-slate-900 border border-slate-800 rounded-xl shadow-xl gap-3 mt-4"):
+                            ui.label("2. Masking Configuration & PII Selection").classes("font-bold text-white text-sm")
+                            ui.label("Review auto-detected PII or pick any additional columns. Bijective 1:1 mapping strictly preserves relational joins across all sheets.").classes("text-xs text-slate-400")
 
                             col_checkboxes = {}
-                            with ui.column().classes("gap-3 bg-slate-950 p-4 rounded-xl border border-slate-800 w-full"):
-                                for t_name, df_t in tables.items():
-                                    ui.label(f"Table: {t_name} ({len(df_t)} rows, {len(df_t.columns)} columns)").classes("text-xs font-bold uppercase text-indigo-400 mt-1")
-                                    suggestions = detection_results.get(t_name, [])
+                            for t_name, df_t in tables.items():
+                                with ui.card().classes("p-3 w-full bg-slate-950 border border-slate-800 rounded-lg gap-2 mt-2"):
+                                    ui.label(f"Table: {t_name} ({len(df_t)} rows, {len(df_t.columns)} cols)").classes("font-semibold text-xs text-indigo-400")
+                                    
+                                    t_sugs = suggestions.get(t_name, [])
                                     detected_cols = set()
-                                    if suggestions:
-                                        for sug in suggestions:
-                                            detected_cols.add(sug["column"])
+                                    if t_sugs:
+                                        for sug in t_sugs:
+                                            detected_cols.add(sug['column'])
                                             col_key = f"{t_name}::{sug['column']}"
                                             cb = ui.checkbox(
-                                                f"{sug['column']} [{sug['category']}] (Sample: '{sug['sample']}')",
+                                                f"Mask '{sug['column']}' (Detected: {sug['category']}, Confidence: {sug['confidence']})",
                                                 value=True
                                             ).classes("text-xs text-slate-200")
                                             col_checkboxes[col_key] = (t_name, sug['column'], sug['category'], cb)
                                     else:
                                         ui.label("No automatic PII flags detected.").classes("text-xs text-slate-500 italic")
 
-                                    # Allow user to pick any additional columns from the table to mask
+                                    # Allow user to pick any additional columns from the table to mask (DEF-12: no monkey-patching)
                                     other_cols = [c for c in df_t.columns if c not in detected_cols]
                                     if other_cols:
                                         extra_select = ui.select(
@@ -588,8 +572,7 @@ def main_page():
                                             label=f"Pick additional columns from {t_name} to mask",
                                             multiple=True
                                         ).classes("w-full text-xs")
-                                        # Stored for apply
-                                        df_t._extra_select = extra_select
+                                        extra_select_widgets[t_name] = extra_select
 
                             # Optional Custom Company Pool
                             ui.label("Optional: Custom Replacement Company Pool").classes("font-bold text-sm text-white mt-2")
@@ -604,12 +587,12 @@ def main_page():
                                             configs[t_name] = {}
                                         configs[t_name][c_name] = cat
 
-                                # Include extra user-selected columns
-                                for t_name, df_t in tables.items():
-                                    if hasattr(df_t, "_extra_select") and df_t._extra_select.value:
+                                # Include extra user-selected columns cleanly from widgets (DEF-12)
+                                for t_name, extra_sel in extra_select_widgets.items():
+                                    if extra_sel.value:
                                         if t_name not in configs:
                                             configs[t_name] = {}
-                                        for extra_col in df_t._extra_select.value:
+                                        for extra_col in extra_sel.value:
                                             configs[t_name][extra_col] = "company_name"
 
                                 if not configs:
@@ -628,7 +611,7 @@ def main_page():
                             ui.button("⚡ Apply Format-Preserving Masking & Preview", icon="security", on_click=apply_and_preview_mask).props("color=indigo").classes("pill-btn rounded-full px-6 font-semibold mt-2")
 
                 def render_mask_preview_results(preview, full_tables, configs, custom_pools):
-                    sample_mask_file = os.path.join(TEMP_DIR, "Masked_Sample_Comparison.xlsx")
+                    sample_mask_file = os.path.join(session_dir, "Masked_Sample_Comparison.xlsx")
                     with pd.ExcelWriter(sample_mask_file, engine="openpyxl") as writer:
                         for t_name, pair in preview.items():
                             pair["original"].to_excel(writer, sheet_name=f"{t_name[:25]}_Orig", index=False)
@@ -665,7 +648,7 @@ def main_page():
 
                             def download_full_masked_dataset():
                                 masked_full = masking_engine.mask_dataset(full_tables, configs, custom_pools)
-                                out_path = os.path.join(TEMP_DIR, "Sanitized_Full_Dataset.xlsx")
+                                out_path = os.path.join(session_dir, "Sanitized_Full_Dataset.xlsx")
                                 with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
                                     for t_name, df_m in masked_full.items():
                                         df_m.to_excel(writer, sheet_name=t_name[:31], index=False)

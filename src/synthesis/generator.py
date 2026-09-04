@@ -1,8 +1,5 @@
-"""
-High-Speed Vectorized Synthetic Data Generator.
-Synthesizes relational SAP and Custom datasets with strict constraint and foreign key enforcement.
-"""
 import random
+import re
 from typing import Dict, Any, Optional
 import numpy as np
 import pandas as pd
@@ -10,6 +7,31 @@ from faker import Faker
 from ..catalog.sap_catalog import SAPCatalogManager
 from ..catalog.schema_models import TableSchema, FieldMeta
 from .rules import FieldRule
+
+
+def sort_specs_topologically(specs_dict: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Topologically sorts table generation specifications so parent/header tables
+    are always generated before child line item tables in relational cascades.
+    """
+    ordered = {}
+    remaining = dict(specs_dict)
+    max_iters = len(specs_dict) * 2
+    iters = 0
+    while remaining and iters < max_iters:
+        iters += 1
+        progress = False
+        for t_name, spec in list(remaining.items()):
+            parent = getattr(spec, "parent_table", None)
+            if not parent or parent in ordered or parent not in specs_dict:
+                ordered[t_name] = spec
+                del remaining[t_name]
+                progress = True
+        if not progress:
+            for t_name, spec in remaining.items():
+                ordered[t_name] = spec
+            break
+    return ordered
 
 
 class DataSynthesizer:
@@ -92,7 +114,8 @@ class DataSynthesizer:
         is_vbrp = table_name.upper() == "VBRP"
 
         # Fast vectorized parent-to-child item allocation using numpy
-        items_per_parent = np.random.randint(1, 5, size=len(parent_df))
+        # For BSEG accounting line items, guarantee >= 2 items per document for double-entry balancing
+        items_per_parent = np.random.choice([2, 4], size=len(parent_df)) if is_bseg else np.random.randint(1, 5, size=len(parent_df))
         parent_indices = np.repeat(np.arange(len(parent_df)), items_per_parent)
         line_numbers = np.concatenate([np.arange(1, k + 1) for k in items_per_parent])
 
@@ -123,6 +146,25 @@ class DataSynthesizer:
                     child_df[k] = parent_subset[k]
             child_df["BUZEI"] = [f"{idx:03d}" for idx in line_numbers]
             child_df["SHKZG"] = ["S" if idx % 2 == 1 else "H" for idx in line_numbers]
+
+            # DEF-13: Balanced double-entry accounting per document
+            # Guarantees sum(Debit 'S') == sum(Credit 'H') per BELNR
+            if "WRBTR" in child_df.columns:
+                for p_idx in range(len(parent_df)):
+                    doc_mask = parent_indices == p_idx
+                    doc_indices = np.where(doc_mask)[0]
+                    if len(doc_indices) >= 2:
+                        s_indices = [i for i in doc_indices if child_df.at[i, "SHKZG"] == "S"]
+                        h_indices = [i for i in doc_indices if child_df.at[i, "SHKZG"] == "H"]
+                        if s_indices and h_indices:
+                            s_sum = round(float(child_df.loc[s_indices, "WRBTR"].sum()), 2)
+                            h_base = round(s_sum / len(h_indices), 2)
+                            for h_i in h_indices[:-1]:
+                                child_df.at[h_i, "WRBTR"] = h_base
+                            child_df.at[h_indices[-1], "WRBTR"] = round(s_sum - (h_base * (len(h_indices) - 1)), 2)
+                            if "DMBTR" in child_df.columns:
+                                for i in doc_indices:
+                                    child_df.at[i, "DMBTR"] = child_df.at[i, "WRBTR"]
         elif is_vbap:
             for k in ["MANDT", "VBELN"]:
                 if k in parent_subset.columns:
@@ -139,9 +181,22 @@ class DataSynthesizer:
                     child_df[k] = parent_subset[k]
             child_df["POSNR"] = [f"{idx * 10:06d}" for idx in line_numbers]
         else:
-            # Generic parent key cascade
+            # Foreign-key-aware cascade (DEF-05: never blindly overwrite child item attributes)
+            applied_fk = False
+            if schema.foreign_keys:
+                for fk in schema.foreign_keys:
+                    if fk.ref_field in parent_subset.columns and fk.field in child_df.columns:
+                        child_df[fk.field] = parent_subset[fk.ref_field]
+                        applied_fk = True
+
+            # Only propagate primary key / header identifier columns
+            HEADER_KEY_CANDIDATES = ("MANDT", "BUKRS", "BELNR", "GJAHR", "VBELN", "EBELN", "TKNUM", "MBLNR", "AUFNR", "KUNNR", "LIFNR")
+            PROTECTED_ITEM_COLS = {
+                "NETWR", "WRBTR", "DMBTR", "MENGE", "KWMENG", "LFIMG", "POSNR", "BUZEI",
+                "EBELP", "ZEILE", "MATNR", "ARKTX", "WERKS", "LGORT", "SHKZG", "ERDAT", "AEDAT"
+            }
             for col in parent_subset.columns:
-                if col in child_df.columns:
+                if col in child_df.columns and col not in PROTECTED_ITEM_COLS and (col in HEADER_KEY_CANDIDATES or not applied_fk):
                     child_df[col] = parent_subset[col]
 
             # Automatically assign standard line item numbers if child has item field
@@ -252,9 +307,12 @@ class DataSynthesizer:
         elif field_name in ("BUZEI", "TPNUM", "ZEILE"):
             return np.array([f"{((i % 5) + 1):0{length}d}" for i in range(row_count)])
 
-        # 8. Dates: Universal match for ANY SAP date field
-        elif "DAT" in field_name or field_name.endswith("DT") or dtype == "DATS":
-            return np.full(row_count, "20260315")
+        # 8. Dates: Strict SAP date fields (prevent substring collisions like MANDAT, DATA, CANDIDATE) (DEF-09)
+        elif ((dtype == "DATS" or bool(re.search(r"(?:_DAT$|_DATE$|^[A-Z0-9]{0,3}DAT[A-Z0-9]?$|^[A-Z0-9]{0,3}DT$|ERDAT|AEDAT|BLDAT|BUDAT|WADAT|FKDAT|AUDAT|BEDAT|CPUDT)", field_name)))
+              and field_name not in ("MANDAT", "DATA", "CANDIDATE", "METADATA", "STAT")):
+            base_ts = pd.Timestamp.now()
+            days_offset = np.random.randint(0, 90, size=row_count)
+            return np.array([(base_ts - pd.Timedelta(days=int(d))).strftime("%Y%m%d") for d in days_offset])
 
         # 9. Times: Universal match for ANY SAP time field
         elif "ZET" in field_name or "TIM" in field_name or "UHR" in field_name or field_name.endswith("TM") or dtype == "TIMS":
@@ -397,7 +455,8 @@ class DataSynthesizer:
                 return np.array([f"{n:0{pad}d}" for n in nums])
         elif rtype == "faker":
             provider = p.get("provider", "company").lower()
-            pool_size = min(250, row_count)
+            # Dynamic scaling up to 5,000 unique items to preserve cardinality at scale (DEF-11)
+            pool_size = min(5000, max(250, int(row_count * 0.5))) if row_count > 250 else row_count
             if "comp" in provider:
                 pool = [self.faker.company() for _ in range(pool_size)]
             elif "city" in provider:
