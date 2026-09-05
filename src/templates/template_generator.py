@@ -27,14 +27,12 @@ class ExcelTemplateBuilder:
         header_fill = PatternFill(start_color="1E293B", end_color="1E293B", fill_type="solid")  # Slate-800
         header_font = Font(name="Segoe UI", size=11, bold=True, color="FFFFFF")
         sub_font = Font(name="Segoe UI", size=10)
-        bold_font = Font(name="Segoe UI", size=10, bold=True)
         thin_border = Border(
             left=Side(style="thin", color="CBD5E1"),
             right=Side(style="thin", color="CBD5E1"),
             top=Side(style="thin", color="CBD5E1"),
             bottom=Side(style="thin", color="CBD5E1"),
         )
-        hint_fill = PatternFill(start_color="F1F5F9", end_color="F1F5F9", fill_type="solid")
 
         # -------------------------------------------------------------
         # SHEET 1: Table_Definitions

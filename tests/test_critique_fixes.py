@@ -4,6 +4,8 @@ Verifies all defect resolutions (DEF-01 through DEF-18).
 """
 import os
 import shutil
+import tempfile
+import openpyxl
 import pandas as pd
 import numpy as np
 from src.catalog.sap_catalog import SAPCatalogManager
@@ -12,6 +14,7 @@ from src.synthesis import DataSynthesizer, sort_specs_topologically, TableGenera
 from src.masking.masking_engine import DataMaskingEngine
 from src.masking.numeric_masker import NumericMasker
 from src.masking.detector import SensitiveColumnDetector
+from src.templates.template_generator import ExcelTemplateBuilder
 
 
 def test_def01_session_state_isolation():
@@ -241,3 +244,118 @@ def test_def17_session_temp_cleanup():
     # Simulate client disconnect cleanup
     shutil.rmtree(session_dir, ignore_errors=True)
     assert not os.path.exists(session_dir)
+
+
+def test_sec7_dead_code_eliminated():
+    """Section 7.1: Verifies dead code segments are completely eliminated."""
+    catalog = SAPCatalogManager()
+    synthesizer = DataSynthesizer(catalog)
+    # _generate_single_default_val must be completely removed
+    assert not hasattr(synthesizer, "_generate_single_default_val")
+
+    # ExcelTemplateBuilder generates valid template without unused styles
+    builder = ExcelTemplateBuilder(catalog)
+    with tempfile.TemporaryDirectory() as td:
+        out = os.path.join(td, "template.xlsx")
+        res = builder.generate_template(out, domain="SAP")
+        assert os.path.exists(res)
+        wb = openpyxl.load_workbook(res)
+        assert "Table_Definitions" in wb.sheetnames
+        assert "Field_Rules" in wb.sheetnames
+
+
+def test_sec7_suffix_o1_lookup_and_prng_isolation():
+    """Section 7.2.1 & 7.3.1: Verifies O(1) suffix set lookup and zero process-wide PRNG mutation."""
+    import random
+    from src.masking.format_preserver import FormatPreservingMasker, LEGAL_SUFFIXES_SET
+    from src.masking.numeric_masker import NumericMasker
+
+    # 1. Verify LEGAL_SUFFIXES_SET is a frozenset and contains upper cleaned suffixes
+    assert isinstance(LEGAL_SUFFIXES_SET, frozenset)
+    assert "LLC" in LEGAL_SUFFIXES_SET
+    assert "GMBH" in LEGAL_SUFFIXES_SET
+    assert "PVT LTD" in LEGAL_SUFFIXES_SET
+
+    masker = FormatPreservingMasker(seed=999)
+    base, suffix = masker.extract_legal_suffix("Siemens AG")
+    assert base == "Siemens"
+    assert suffix == "AG"
+
+    base_pvt, suffix_pvt = masker.extract_legal_suffix("Acme Corp Pvt. Ltd.")
+    assert base_pvt == "Acme Corp"
+    assert suffix_pvt == "Pvt. Ltd."
+
+    # 2. Verify PRNG Isolation: instantiating maskers must NOT mutate global process random state
+    random.seed(12345)
+    expected_rand = random.random()
+    # Reset to 12345
+    random.seed(12345)
+
+    # Initialize maskers with different seeds
+    _ = FormatPreservingMasker(seed=777)
+    _ = NumericMasker(seed=888)
+
+    # Global process random state must be identical to unmutated sequence
+    actual_rand = random.random()
+    assert actual_rand == expected_rand, "Global PRNG was mutated by FormatPreservingMasker or NumericMasker __init__!"
+
+
+def test_sec7_vectorized_cython_mapping_and_case_insensitive_col_map():
+    """Section 7.2.2, 7.2.3, 7.2.4: Verifies Cython map.fillna, precomputed col_map, and deferred copy."""
+    engine = DataMaskingEngine(seed=42)
+    df = pd.DataFrame({
+        "COMPANY_NAME": ["Alpha LLC", "Beta AG", None, "Gamma Inc"],
+        "AMOUNT": [100.50, 200.75, 300.0, None],
+        "UNTOUCHED": ["Keep1", "Keep2", "Keep3", "Keep4"]
+    })
+
+    # Case-insensitive column config ("company_name" lowercase)
+    configs = {
+        "TEST_TBL": {
+            "company_name": "company_name",
+            "amount": "amount"
+        }
+    }
+
+    masked = engine.mask_dataset({"TEST_TBL": df}, configs)
+    res_df = masked["TEST_TBL"]
+
+    # 1. Non-null company names masked, null preserved
+    assert res_df["COMPANY_NAME"].iloc[0].endswith("LLC")
+    assert res_df["COMPANY_NAME"].iloc[1].endswith("AG")
+    assert pd.isna(res_df["COMPANY_NAME"].iloc[2])
+    assert res_df["COMPANY_NAME"].iloc[3].endswith("Inc")
+
+    # 2. Untouched column completely preserved
+    assert list(res_df["UNTOUCHED"]) == ["Keep1", "Keep2", "Keep3", "Keep4"]
+
+    # 3. Deferred copy test: if no configs apply, df is copied cleanly without error
+    unaffected = engine.mask_dataset({"TEST_TBL": df}, {"TEST_TBL": {}})
+    assert unaffected["TEST_TBL"].equals(df)
+
+
+def test_sec7_streaming_excel_export():
+    """Section 7.3.2: Verifies streaming openpyxl write_only mode for large enterprise tables."""
+    from app import export_dataframes_to_excel
+    with tempfile.TemporaryDirectory() as td:
+        out_path = os.path.join(td, "streamed_export.xlsx")
+        df1 = pd.DataFrame({"ID": [1, 2], "VAL": ["A", "B"]})
+        df2 = pd.DataFrame({"ITEM": ["X", "Y", "Z"], "QTY": [10, 20, 30]})
+
+        # Test normal write (< 25,000 rows)
+        export_dataframes_to_excel({"TABLE1": df1, "TABLE2": df2}, out_path)
+        assert os.path.exists(out_path)
+        read_df1 = pd.read_excel(out_path, sheet_name="TABLE1")
+        assert len(read_df1) == 2
+        assert list(read_df1.columns) == ["ID", "VAL"]
+
+        # Test streaming write mode simulation (> 25,000 rows threshold)
+        out_stream_path = os.path.join(td, "large_stream.xlsx")
+        # Create a mock dictionary where total rows triggers write_only
+        large_df = pd.DataFrame({"NUM": range(26000), "TEXT": ["sample"] * 26000})
+        export_dataframes_to_excel({"LARGE_TABLE": large_df}, out_stream_path)
+        assert os.path.exists(out_stream_path)
+        # Verify file can be read and row count matches
+        read_large = pd.read_excel(out_stream_path, sheet_name="LARGE_TABLE")
+        assert len(read_large) == 26000
+

@@ -182,12 +182,10 @@ class DataSynthesizer:
             child_df["POSNR"] = [f"{idx * 10:06d}" for idx in line_numbers]
         else:
             # Foreign-key-aware cascade (DEF-05 & DEF-16: only cascade legitimate identifiers)
-            applied_fk = False
             if schema.foreign_keys:
                 for fk in schema.foreign_keys:
                     if fk.ref_field in parent_subset.columns and fk.field in child_df.columns:
                         child_df[fk.field] = parent_subset[fk.ref_field]
-                        applied_fk = True
 
             # Candidate header identifier columns to cascade
             HEADER_KEY_CANDIDATES = {
@@ -426,11 +424,6 @@ class DataSynthesizer:
         else:
             # Clean enterprise code
             return np.random.choice([f"STD_{100 + i}"[:length] for i in range(10)], size=row_count)
-
-    def _generate_single_default_val(self, table_name: str, field_name: str, f_meta: Any) -> Any:
-        """Generates a single default value for a child table row."""
-        vals = self._generate_default_field(table_name, field_name, f_meta, 1)
-        return vals[0]
 
     def _generate_from_rule(self, rule: FieldRule, row_count: int, f_meta: Any) -> np.ndarray:
         """Executes a custom rule across N rows."""

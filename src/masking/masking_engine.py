@@ -55,23 +55,27 @@ class DataMaskingEngine:
         masked_tables = {}
 
         for tbl_name, df in tables.items():
-            masked_df = df.copy()
             tbl_cfg = column_configs.get(tbl_name, {})
+            if not tbl_cfg or df.empty:
+                masked_tables[tbl_name] = df.copy()
+                continue
 
+            # Pre-compute case-insensitive column map (Section 7.2.3: O(1) column lookup)
+            col_map = {col.strip().upper(): col for col in df.columns}
+            applicable_cols = []
             for col_name, category in tbl_cfg.items():
-                if col_name not in masked_df.columns:
-                    # Case-insensitive column matching
-                    matched_col = None
-                    for actual_col in masked_df.columns:
-                        if actual_col.strip().upper() == col_name.strip().upper():
-                            matched_col = actual_col
-                            break
-                    if not matched_col:
-                        continue
-                    target_col = matched_col
-                else:
-                    target_col = col_name
+                target_col = col_map.get(col_name.strip().upper())
+                if target_col and target_col in df.columns:
+                    applicable_cols.append((target_col, category))
 
+            if not applicable_cols:
+                masked_tables[tbl_name] = df.copy()
+                continue
+
+            # Defer DataFrame copy until confirmed that columns will be masked (Section 7.2.4)
+            masked_df = df.copy()
+
+            for target_col, category in applicable_cols:
                 # Shared domain for cross-table referential integrity:
                 # If column is an ID (e.g. KUNNR, LIFNR, BELNR, CUSTOMER_ID), use normalized column name as domain
                 domain_key = target_col.strip().upper() if category in ("id_number", "company_name", "bank_iban") else f"{tbl_name}_{target_col}"
@@ -79,7 +83,8 @@ class DataMaskingEngine:
                 # High-speed vectorized dictionary mapping over unique values
                 unique_vals = [v for v in masked_df[target_col].dropna().unique() if str(v).strip() != ""]
                 val_mapping = {v: self._mask_cell(v, category, domain_key) for v in unique_vals}
-                masked_df[target_col] = masked_df[target_col].map(lambda v: val_mapping.get(v, v))
+                # Cython-vectorized mapping with fillna to avoid interpreted Python lambdas (Section 7.2.2)
+                masked_df[target_col] = masked_df[target_col].map(val_mapping).fillna(masked_df[target_col])
 
             masked_tables[tbl_name] = masked_df
 

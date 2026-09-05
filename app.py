@@ -47,6 +47,29 @@ def cleanup_stale_temp_dirs():
 cleanup_stale_temp_dirs()
 
 
+def export_dataframes_to_excel(dfs: dict, output_path: str):
+    """
+    Optimized multi-table Excel exporter (Section 7.3.2).
+    For large enterprise tables (>25,000 total rows), utilizes openpyxl's
+    write_only streaming mode to maintain O(1) memory consumption and avoid
+    building multi-gigabyte in-memory XML DOM trees.
+    """
+    total_rows = sum(len(d) for d in dfs.values())
+    if total_rows > 25000:
+        import openpyxl
+        wb = openpyxl.Workbook(write_only=True)
+        for t_name, df_out in dfs.items():
+            ws = wb.create_sheet(title=str(t_name)[:31])
+            ws.append(list(df_out.columns))
+            for row in df_out.itertuples(index=False, name=None):
+                ws.append(list(row))
+        wb.save(output_path)
+    else:
+        with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
+            for t_name, df_out in dfs.items():
+                df_out.to_excel(writer, sheet_name=str(t_name)[:31], index=False)
+
+
 class StudioState:
     """Session-isolated reactive state for the Enterprise Studio (DEF-01)."""
     def __init__(self):
@@ -480,9 +503,7 @@ def main_page(client: Client):
                             full_dfs[t_name] = parent_df
 
                     out_path = os.path.join(session_dir, f"{state.domain}_Synthesized_Full_Dataset.xlsx")
-                    with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
-                        for t_name, df_out in full_dfs.items():
-                            df_out.to_excel(writer, sheet_name=t_name[:31], index=False)
+                    export_dataframes_to_excel(full_dfs, out_path)
 
                     total_rows = sum(len(d) for d in full_dfs.values())
                     ui.notify(f"Successfully synthesized {total_rows:,} records across {len(full_dfs)} tables!", type="positive", position="top")
@@ -670,9 +691,7 @@ def main_page(client: Client):
                             def download_full_masked_dataset():
                                 masked_full = masking_engine.mask_dataset(full_tables, configs, custom_pools)
                                 out_path = os.path.join(session_dir, "Sanitized_Full_Dataset.xlsx")
-                                with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
-                                    for t_name, df_m in masked_full.items():
-                                        df_m.to_excel(writer, sheet_name=t_name[:31], index=False)
+                                export_dataframes_to_excel(masked_full, out_path)
 
                                 total_rows = sum(len(d) for d in masked_full.values())
                                 ui.notify(f"Sanitized {total_rows:,} records preserving 1:1 cardinality!", type="positive", position="top")

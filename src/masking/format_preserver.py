@@ -9,6 +9,7 @@ from typing import Optional, Tuple
 from faker import Faker
 
 # Common international enterprise legal suffixes (case-insensitive regex)
+# Common international enterprise legal suffixes (case-insensitive regex)
 LEGAL_SUFFIXES = [
     "LLC", "L.L.C.", "INC", "INC.", "CORP", "CORP.", "CORPORATION",
     "GMBH", "G.M.B.H.", "AG", "A.G.", "LTD", "LTD.", "LIMITED",
@@ -16,6 +17,8 @@ LEGAL_SUFFIXES = [
     "BV", "B.V.", "NV", "N.V.", "PLC", "P.L.C.", "KG", "SE",
     "HOLDINGS", "GROUP", "SOLUTIONS", "INTERNATIONAL"
 ]
+# Precomputed normalized set for O(1) instantaneous suffix membership lookups (Section 7.2.1)
+LEGAL_SUFFIXES_SET = frozenset(s.replace(".", "").upper() for s in LEGAL_SUFFIXES)
 
 # Curated business words for realistic enterprise company name generation
 BUSINESS_PREFIXES = [
@@ -45,8 +48,8 @@ class FormatPreservingMasker:
 
     def __init__(self, seed: int = 42):
         self.faker = Faker()
-        Faker.seed(seed)
-        random.seed(seed)
+        self.faker.seed_instance(seed)
+        self.rng = random.Random(seed)  # Scoped private PRNG; zero process-wide mutation (Section 7.3.1)
 
     def extract_legal_suffix(self, company_name: str) -> Tuple[str, Optional[str]]:
         """
@@ -59,18 +62,16 @@ class FormatPreservingMasker:
         if not tokens:
             return ("", None)
 
-        # Check multi-word suffixes first (e.g. 'PVT LTD')
+        # Check multi-word suffixes first with O(1) hash set (e.g. 'PVT LTD')
         if len(tokens) >= 2:
-            two_word_suffix = f"{tokens[-2]} {tokens[-1]}".upper()
-            for s in LEGAL_SUFFIXES:
-                if two_word_suffix == s or two_word_suffix.replace(".", "") == s:
-                    return (" ".join(tokens[:-2]), f"{tokens[-2]} {tokens[-1]}")
+            two_word_clean = f"{tokens[-2]} {tokens[-1]}".upper().replace(".", "")
+            if two_word_clean in LEGAL_SUFFIXES_SET:
+                return (" ".join(tokens[:-2]), f"{tokens[-2]} {tokens[-1]}")
 
-        # Check single-word suffix
-        last_word = tokens[-1].upper().replace(",", "")
-        for s in LEGAL_SUFFIXES:
-            if last_word == s or last_word.replace(".", "") == s:
-                return (" ".join(tokens[:-1]).rstrip(","), tokens[-1])
+        # Check single-word suffix with O(1) hash set
+        last_word_clean = tokens[-1].upper().replace(",", "").replace(".", "")
+        if last_word_clean in LEGAL_SUFFIXES_SET:
+            return (" ".join(tokens[:-1]).rstrip(","), tokens[-1])
 
         return (cleaned, None)
 
@@ -96,24 +97,24 @@ class FormatPreservingMasker:
             if num_words < 2 and suffix:
                 num_words = 2  # e.g., 'ABB LLC' (1 word base + LLC) -> generates 2-word base + LLC = 3-word company
 
-        # Build base name
+        # Build base name using private PRNG
         if num_words == 1:
             # Could be an acronym or single brand name
             if base_name.isupper() and len(base_name) <= 4:
                 # Generate matching uppercase acronym (e.g., KXT, NVR)
-                base = "".join(random.choices("ABCDEFGHIJKLMNOPQRSTUVWXYZ", k=len(base_name)))
+                base = "".join(self.rng.choices("ABCDEFGHIJKLMNOPQRSTUVWXYZ", k=len(base_name)))
             else:
-                base = random.choice(BUSINESS_PREFIXES)
+                base = self.rng.choice(BUSINESS_PREFIXES)
         elif num_words == 2:
-            base = f"{random.choice(BUSINESS_PREFIXES)} {random.choice(BUSINESS_MIDDLES)}"
+            base = f"{self.rng.choice(BUSINESS_PREFIXES)} {self.rng.choice(BUSINESS_MIDDLES)}"
         elif num_words == 3:
-            base = f"{random.choice(BUSINESS_PREFIXES)} {random.choice(BUSINESS_MIDDLES)} {random.choice(BUSINESS_NOUNS)}"
+            base = f"{self.rng.choice(BUSINESS_PREFIXES)} {self.rng.choice(BUSINESS_MIDDLES)} {self.rng.choice(BUSINESS_NOUNS)}"
         else:
             # 4+ words
-            parts = [random.choice(BUSINESS_PREFIXES)]
+            parts = [self.rng.choice(BUSINESS_PREFIXES)]
             for _ in range(num_words - 2):
-                parts.append(random.choice(BUSINESS_MIDDLES))
-            parts.append(random.choice(BUSINESS_NOUNS))
+                parts.append(self.rng.choice(BUSINESS_MIDDLES))
+            parts.append(self.rng.choice(BUSINESS_NOUNS))
             base = " ".join(parts)
 
         # Preserve all-caps casing if original was fully uppercase
@@ -134,7 +135,7 @@ class FormatPreservingMasker:
             return f"{self.faker.first_name()} {self.faker.last_name()}"
         elif len(tokens) == 3 and (len(tokens[1]) <= 2 or tokens[1].endswith(".")):
             # Initial in middle: e.g. John D. Doe
-            initial = random.choice("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+            initial = self.rng.choice("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
             return f"{self.faker.first_name()} {initial}. {self.faker.last_name()}"
         else:
             return f"{self.faker.first_name()} {self.faker.last_name()}"
@@ -145,7 +146,7 @@ class FormatPreservingMasker:
             return self.faker.email()
         parts = original_email.split("@")
         user = re.sub(r"[^a-zA-Z0-9]", "", parts[0])[:8] or "user"
-        random_id = random.randint(100, 999)
+        random_id = self.rng.randint(100, 999)
         return f"synth_{user}_{random_id}@enterprisetest.org"
 
     def mask_tax_vat_id(self, original_vat: str) -> str:
@@ -154,7 +155,7 @@ class FormatPreservingMasker:
         if len(cleaned) >= 4 and cleaned[:2].isalpha():
             prefix = cleaned[:2]
             num_digits = len(cleaned) - 2
-            random_digits = "".join(random.choices("0123456789", k=num_digits))
+            random_digits = "".join(self.rng.choices("0123456789", k=num_digits))
             return f"{prefix}{random_digits}"
         else:
-            return "".join(random.choices("0123456789", k=len(cleaned)))
+            return "".join(self.rng.choices("0123456789", k=len(cleaned)))

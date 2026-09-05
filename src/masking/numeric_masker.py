@@ -14,7 +14,7 @@ class NumericMasker:
     """
 
     def __init__(self, seed: int = 42):
-        random.seed(seed)
+        self.rng = random.Random(seed)  # Scoped private PRNG; zero process-wide mutation (Section 7.3.1)
 
     def mask_id_string(self, original_id: str) -> str:
         """
@@ -31,12 +31,12 @@ class NumericMasker:
 
         if leading_zeros == total_len:
             # All zeros: generate valid zero-padded number
-            return "0" * (total_len - 1) + str(random.randint(1, 9))
+            return "0" * (total_len - 1) + str(self.rng.randint(1, 9))
 
         non_zero_len = total_len - leading_zeros
         # Generate new random digits
-        first_digit = str(random.randint(1, 9))
-        remaining = "".join(random.choices("0123456789", k=non_zero_len - 1))
+        first_digit = str(self.rng.randint(1, 9))
+        remaining = "".join(self.rng.choices("0123456789", k=non_zero_len - 1))
         new_body = first_digit + remaining
 
         # Re-attach leading zeros
@@ -66,8 +66,8 @@ class NumericMasker:
         p_range = max(0.001, abs(perturbation_range))
         min_shift = min(0.05, p_range * 0.5)
         max_shift = max(min_shift, p_range)
-        direction = random.choice([-1, 1])
-        shift_pct = random.uniform(min_shift, max_shift)
+        direction = self.rng.choice([-1, 1])
+        shift_pct = self.rng.uniform(min_shift, max_shift)
         shifted_val = abs_val * (1.0 + (direction * shift_pct))
 
         return round(sign * shifted_val, 2)
@@ -78,8 +78,8 @@ class NumericMasker:
         if len(raw) >= 15 and raw[:2].isalpha():
             # IBAN: e.g. DE89 3704 0044 0532 0130 00
             country = raw[:2]
-            check_digits = f"{random.randint(10, 99)}"
-            account_digits = "".join(random.choices("0123456789", k=len(raw) - 4))
+            check_digits = f"{self.rng.randint(10, 99)}"
+            account_digits = "".join(self.rng.choices("0123456789", k=len(raw) - 4))
             return f"{country}{check_digits}{account_digits}"
         else:
-            return "".join(random.choices("0123456789", k=len(raw) if len(raw) > 0 else 10))
+            return "".join(self.rng.choices("0123456789", k=len(raw) if len(raw) > 0 else 10))
