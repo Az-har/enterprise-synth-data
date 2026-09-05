@@ -6,10 +6,12 @@ real-time audit diagnostics, format-preserving masking, and an embedded 42k SAP 
 """
 import os
 import io
+import shutil
+import time
 import tempfile
 import uuid
 import pandas as pd
-from nicegui import ui
+from nicegui import ui, Client
 
 from src.catalog.sap_catalog import SAPCatalogManager
 from src.templates.template_generator import ExcelTemplateBuilder
@@ -19,15 +21,30 @@ from src.synthesis import DataSynthesizer, sort_specs_topologically
 from src.masking.masking_engine import DataMaskingEngine
 
 
-# Initialize core backend engines
+# Initialize pure stateless backend engines
 catalog = SAPCatalogManager()
 template_builder = ExcelTemplateBuilder(catalog)
 excel_parser = FaultTolerantExcelParser(catalog)
 synthesizer = DataSynthesizer(catalog)
-masking_engine = DataMaskingEngine()
 
 TEMP_DIR = os.path.join(tempfile.gettempdir(), "enterprise_synth")
 os.makedirs(TEMP_DIR, exist_ok=True)
+
+
+def cleanup_stale_temp_dirs():
+    """Removes orphaned session directories older than 1 hour (DEF-17)."""
+    now = time.time()
+    if os.path.exists(TEMP_DIR):
+        for entry in os.scandir(TEMP_DIR):
+            if entry.is_dir():
+                try:
+                    if now - entry.stat().st_mtime > 3600:
+                        shutil.rmtree(entry.path, ignore_errors=True)
+                except Exception:
+                    pass
+
+
+cleanup_stale_temp_dirs()
 
 
 class StudioState:
@@ -54,12 +71,16 @@ def trigger_download(file_path: str, file_name: str):
 # MAIN PAGE LAYOUT: ENTERPRISE STUDIO WORKSPACE
 # ---------------------------------------------------------------------------
 @ui.page("/")
-def main_page():
-    # Session-isolated state & workspace directory per client connection (DEF-01, DEF-14)
+def main_page(client: Client):
+    # Session-isolated state & masking vault per client connection (DEF-01, DEF-15)
     state = StudioState()
+    masking_engine = DataMaskingEngine()
     session_id = uuid.uuid4().hex[:8]
     session_dir = os.path.join(TEMP_DIR, session_id)
     os.makedirs(session_dir, exist_ok=True)
+
+    # Automatically purge session files when client disconnects (DEF-17)
+    client.on_disconnect(lambda: shutil.rmtree(session_dir, ignore_errors=True))
 
     ui.add_head_html("""
         <style>

@@ -10,6 +10,11 @@ class FieldRule(BaseModel):
     field_name: str
     rule_type: str = Field(..., description="'choice', 'range', 'distribution', 'fk_cascade', 'faker', 'sequence', 'fixed'")
     parameters: Dict[str, Any] = Field(default_factory=dict)
+
+    def __init__(self, **data):
+        if "params" in data and "parameters" not in data:
+            data["parameters"] = data.pop("params")
+        super().__init__(**data)
     
     # Examples:
     # rule_type='choice', parameters={'choices': ['1000', '2000'], 'weights': [0.7, 0.3]}

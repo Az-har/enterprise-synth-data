@@ -181,7 +181,7 @@ class DataSynthesizer:
                     child_df[k] = parent_subset[k]
             child_df["POSNR"] = [f"{idx * 10:06d}" for idx in line_numbers]
         else:
-            # Foreign-key-aware cascade (DEF-05: never blindly overwrite child item attributes)
+            # Foreign-key-aware cascade (DEF-05 & DEF-16: only cascade legitimate identifiers)
             applied_fk = False
             if schema.foreign_keys:
                 for fk in schema.foreign_keys:
@@ -189,21 +189,32 @@ class DataSynthesizer:
                         child_df[fk.field] = parent_subset[fk.ref_field]
                         applied_fk = True
 
-            # Only propagate primary key / header identifier columns
-            HEADER_KEY_CANDIDATES = ("MANDT", "BUKRS", "BELNR", "GJAHR", "VBELN", "EBELN", "TKNUM", "MBLNR", "AUFNR", "KUNNR", "LIFNR")
+            # Candidate header identifier columns to cascade
+            HEADER_KEY_CANDIDATES = {
+                "MANDT", "BUKRS", "BELNR", "GJAHR", "VBELN", "EBELN", "TKNUM",
+                "MBLNR", "AUFNR", "KUNNR", "LIFNR", "ID", "ORDER_ID", "DOC_ID", "HEADER_ID"
+            }
             PROTECTED_ITEM_COLS = {
                 "NETWR", "WRBTR", "DMBTR", "MENGE", "KWMENG", "LFIMG", "POSNR", "BUZEI",
-                "EBELP", "ZEILE", "MATNR", "ARKTX", "WERKS", "LGORT", "SHKZG", "ERDAT", "AEDAT"
+                "EBELP", "ZEILE", "MATNR", "ARKTX", "WERKS", "LGORT", "SHKZG", "ERDAT", "AEDAT",
+                "STATUS", "DESCRIPTION", "DESC", "COMMENT", "COMMENTS", "NOTE", "NOTES",
+                "PRICE", "UNIT_PRICE", "TOTAL", "LINE_TOTAL"
             }
             for col in parent_subset.columns:
-                if col in child_df.columns and col not in PROTECTED_ITEM_COLS and (col in HEADER_KEY_CANDIDATES or not applied_fk):
+                is_candidate_key = (
+                    col in HEADER_KEY_CANDIDATES
+                    or col.endswith("_ID")
+                    or col.endswith("_NR")
+                    or col.endswith("_NUM")
+                )
+                if col in child_df.columns and col not in PROTECTED_ITEM_COLS and is_candidate_key:
                     child_df[col] = parent_subset[col]
 
             # Automatically assign standard line item numbers if child has item field
-            for item_col in ("POSNR", "BUZEI", "EBELP", "ZEILE", "TPNUM", "BNFPO"):
+            for item_col in ("POSNR", "BUZEI", "EBELP", "ZEILE", "TPNUM", "BNFPO", "LINE_ID", "ITEM_ID", "ITEM_NUM"):
                 if item_col in child_df.columns:
                     step = 10 if item_col in ("POSNR", "EBELP", "BNFPO") else 1
-                    pad = schema.fields[item_col].length if item_col in schema.fields else 6
+                    pad = schema.fields[item_col].length if (schema.fields and item_col in schema.fields and hasattr(schema.fields[item_col], "length")) else 6
                     child_df[item_col] = [f"{idx * step:0{pad}d}" for idx in line_numbers]
                     break
 
@@ -427,7 +438,7 @@ class DataSynthesizer:
         p = rule.parameters
 
         if rtype == "choice":
-            choices = p.get("choices", ["VAL_A", "VAL_B"])
+            choices = p.get("choices") or p.get("values") or ["STD_1", "STD_2"]
             weights = p.get("weights")
             return np.random.choice(choices, size=row_count, p=weights)
         elif rtype == "range":
