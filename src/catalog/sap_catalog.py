@@ -17,6 +17,9 @@ class SAPCatalogManager:
         self.db_path = db_path
         if not os.path.exists(self.db_path):
             raise FileNotFoundError(f"Offline SAP catalog database not found at {self.db_path}. Run build_sap_catalog.py first.")
+        # In-memory schema and list caches for ultra-fast repeated lookups
+        self._table_cache: Dict[str, Optional[TableSchema]] = {}
+        self._list_tables_cache: Optional[List[Dict[str, str]]] = None
 
     def _get_conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
@@ -25,11 +28,14 @@ class SAPCatalogManager:
 
     def list_tables(self) -> List[Dict[str, str]]:
         """Returns list of all available SAP tables with descriptions and categories."""
+        if self._list_tables_cache is not None:
+            return self._list_tables_cache
+
         with self._get_conn() as conn:
             cur = conn.cursor()
             cur.execute("SELECT name, description, category, keys FROM tables ORDER BY category, name")
             rows = cur.fetchall()
-            return [
+            result = [
                 {
                     "name": row["name"],
                     "description": row["description"],
@@ -38,16 +44,22 @@ class SAPCatalogManager:
                 }
                 for row in rows
             ]
+            self._list_tables_cache = result
+            return result
 
     def get_table(self, table_name: str) -> Optional[TableSchema]:
-        """Loads complete TableSchema including fields, primary keys, and foreign keys (100% offline)."""
+        """Loads complete TableSchema including fields, primary keys, and foreign keys (100% offline, cached)."""
         normalized_name = table_name.strip().upper()
+        if normalized_name in self._table_cache:
+            return self._table_cache[normalized_name]
+
         with self._get_conn() as conn:
             cur = conn.cursor()
             cur.execute("SELECT name, description, category, keys FROM tables WHERE UPPER(name) = ?", (normalized_name,))
             tbl_row = cur.fetchone()
 
             if not tbl_row:
+                self._table_cache[normalized_name] = None
                 return None
 
             keys = tbl_row["keys"].split(",") if tbl_row["keys"] else []
@@ -96,7 +108,7 @@ class SAPCatalogManager:
                 for fk in fk_rows
             ]
 
-            return TableSchema(
+            schema = TableSchema(
                 name=tbl_row["name"],
                 description=tbl_row["description"],
                 category=tbl_row["category"],
@@ -104,6 +116,8 @@ class SAPCatalogManager:
                 fields=fields,
                 foreign_keys=foreign_keys
             )
+            self._table_cache[normalized_name] = schema
+            return schema
 
     def get_foreign_keys(self, table_name: str) -> List[ForeignKey]:
         """Returns outgoing foreign key relationships for a table."""
@@ -120,7 +134,7 @@ class SAPCatalogManager:
             """, (table_name.strip().upper(), field_name.strip().upper()))
             return [PossibleValue(val=r["val"], desc=r["description"] or "") for r in cur.fetchall()]
 
-    def search(self, query: str) -> List[Dict[str, Any]]:
+    def search(self, query: str, limit: int = 50) -> List[Dict[str, Any]]:
         """Searches across table names, descriptions, and field names."""
         pattern = f"%{query.strip().upper()}%"
         with self._get_conn() as conn:
@@ -129,22 +143,24 @@ class SAPCatalogManager:
             cur.execute("""
                 SELECT name, description, category FROM tables
                 WHERE UPPER(name) LIKE ? OR UPPER(description) LIKE ?
-            """, (pattern, pattern))
+                LIMIT ?
+            """, (pattern, pattern, limit))
             tbl_results = [
                 {"type": "table", "name": r["name"], "description": r["description"], "category": r["category"]}
                 for r in cur.fetchall()
             ]
 
             # Match fields
+            remaining_limit = max(1, limit - len(tbl_results))
             cur.execute("""
                 SELECT table_name, name, description, data_type FROM fields
                 WHERE UPPER(name) LIKE ? OR UPPER(description) LIKE ?
-                LIMIT 20
-            """, (pattern, pattern))
+                LIMIT ?
+            """, (pattern, pattern, remaining_limit))
             field_results = [
                 {"type": "field", "table": r["table_name"], "name": r["name"], "description": r["description"], "data_type": r["data_type"]}
                 for r in cur.fetchall()
             ]
 
-            return tbl_results + field_results
+            return (tbl_results + field_results)[:limit]
 

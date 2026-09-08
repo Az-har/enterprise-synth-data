@@ -359,3 +359,102 @@ def test_sec7_streaming_excel_export():
         read_large = pd.read_excel(out_stream_path, sheet_name="LARGE_TABLE")
         assert len(read_large) == 26000
 
+
+def test_catalog_caching_and_search_limit():
+    """Verifies in-memory schema caching and search query capping in SAPCatalogManager."""
+    catalog = SAPCatalogManager()
+    
+    # 1. Verify schema caching
+    schema1 = catalog.get_table("BKPF")
+    schema2 = catalog.get_table("bkpf")
+    assert schema1 is not None
+    assert schema1 is schema2  # Exact same cached instance
+
+    # 2. Verify list_tables caching
+    list1 = catalog.list_tables()
+    list2 = catalog.list_tables()
+    assert list1 is list2
+
+    # 3. Verify search limit cap
+    res = catalog.search("E", limit=5)
+    assert len(res) <= 5
+
+
+def test_detector_precompilation_and_header_helper():
+    """Verifies precompiled detector regexes and static header categorization."""
+    from src.masking.detector import SensitiveColumnDetector, COMPILED_SENSITIVE_PATTERNS
+    
+    # Check compiled regex dictionary
+    assert isinstance(COMPILED_SENSITIVE_PATTERNS, dict)
+    assert "company_name" in COMPILED_SENSITIVE_PATTERNS
+
+    # Check detect_category_from_header helper
+    assert SensitiveColumnDetector.detect_category_from_header("NAME1") == "company_name"
+    assert SensitiveColumnDetector.detect_category_from_header("NETWR") == "financial_amount"
+    assert SensitiveColumnDetector.detect_category_from_header("STCEG") == "vat_tax_id"
+    assert SensitiveColumnDetector.detect_category_from_header("IBAN") == "bank_iban"
+    assert SensitiveColumnDetector.detect_category_from_header("KUNNR") == "id_number"
+    assert SensitiveColumnDetector.detect_category_from_header("EMAIL") == "email"
+    assert SensitiveColumnDetector.detect_category_from_header("RANDOM_COL_XYZ") is None
+
+
+def test_parser_zero_dummy_strings():
+    """Verifies zero dummy strings (VAL_...) in excel_parser fallback rules."""
+    from src.templates.excel_parser import FaultTolerantExcelParser
+    parser = FaultTolerantExcelParser()
+
+    # Empty choice string fallback
+    rule1 = parser._parse_rule_string("TEST_COL", "choice", "")
+    assert "VAL_A" not in rule1.parameters.get("choices", [])
+    assert "VAL_B" not in rule1.parameters.get("choices", [])
+    assert rule1.parameters["choices"] == ["STD_1", "STD_2"]
+
+    # Unknown rule type fallback
+    rule2 = parser._parse_rule_string("TEST_COL", "unknown_type", "")
+    assert "VAL_1" not in rule2.parameters.get("choices", [])
+    assert rule2.parameters["choices"] == ["STD_1"]
+
+
+def test_generator_scoped_prng_isolation_and_multiplicity():
+    """Verifies scoped PRNG determinism and items_per_parent_range support."""
+    catalog = SAPCatalogManager()
+    synth1 = DataSynthesizer(catalog, seed=1234)
+    synth2 = DataSynthesizer(catalog, seed=1234)
+
+    df1 = synth1.generate_sap_table("BKPF", row_count=20)
+    df2 = synth2.generate_sap_table("BKPF", row_count=20)
+    pd.testing.assert_frame_equal(df1, df2)
+
+    # Test custom items_per_parent_range (e.g. exactly 3 items per header)
+    parent_df = df1.head(5)
+    child_df = synth1.generate_sap_table(
+        "BSEG",
+        parent_df=parent_df,
+        items_per_parent_range=[3, 3]
+    )
+    assert len(child_df) == 15  # 5 parents * 3 items
+
+
+def test_export_nan_sanitization():
+    """Verifies openpyxl write_only mode converts NaN to None for clean Excel blank cells."""
+    from app import export_dataframes_to_excel
+    import numpy as np
+    
+    with tempfile.TemporaryDirectory() as td:
+        out_path = os.path.join(td, "nan_test.xlsx")
+        df_with_nan = pd.DataFrame({
+            "A": [1.0, np.nan, 3.0] * 9000,
+            "B": [None, "Valid", np.nan] * 9000
+        })
+        # Over 25,000 rows to trigger write_only streaming
+        assert len(df_with_nan) == 27000
+        export_dataframes_to_excel({"TEST_SHEET": df_with_nan}, out_path)
+        assert os.path.exists(out_path)
+        
+        # Read back and verify row count and NaN preservation
+        read_df = pd.read_excel(out_path, sheet_name="TEST_SHEET")
+        assert len(read_df) == 27000
+        assert pd.isna(read_df.at[1, "A"])
+        assert pd.isna(read_df.at[0, "B"])
+        assert read_df.at[1, "B"] == "Valid"
+

@@ -18,7 +18,7 @@ from src.templates.template_generator import ExcelTemplateBuilder
 from src.templates.meta_prompt import MetaPromptGenerator
 from src.templates.excel_parser import FaultTolerantExcelParser
 from src.synthesis import DataSynthesizer, sort_specs_topologically
-from src.masking.masking_engine import DataMaskingEngine
+from src.masking import DataMaskingEngine, SensitiveColumnDetector
 
 
 # Initialize pure stateless backend engines
@@ -62,7 +62,7 @@ def export_dataframes_to_excel(dfs: dict, output_path: str):
             ws = wb.create_sheet(title=str(t_name)[:31])
             ws.append(list(df_out.columns))
             for row in df_out.itertuples(index=False, name=None):
-                ws.append(list(row))
+                ws.append([None if pd.isna(x) else x for x in row])
         wb.save(output_path)
     else:
         with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
@@ -347,7 +347,11 @@ def main_page(client: Client):
 
                                     with ui.row().classes("w-full gap-3 mt-1"):
                                         ui.button("🔄 Try Again", icon="refresh", on_click=reset_spec_uploader).props("color=rose dense").classes("pill-btn rounded-lg text-xs font-semibold px-4 py-2")
-                                        ui.button("📥 Download Fresh Template", icon="download", on_click=lambda: trigger_download(tpl_file, f"{state.domain}_Data_Spec_Template.xlsx")).props("outline color=white dense").classes("rounded-lg text-xs px-3")
+                                        def download_audit_template():
+                                            if not os.path.exists(tpl_file):
+                                                template_builder.generate_template(tpl_file, domain=state.domain)
+                                            trigger_download(tpl_file, f"{state.domain}_Data_Spec_Template.xlsx")
+                                        ui.button("📥 Download Fresh Template", icon="download", on_click=download_audit_template).props("outline color=white dense").classes("rounded-lg text-xs px-3")
                                 return
 
                             # Audit Success Card
@@ -395,7 +399,8 @@ def main_page(client: Client):
                             child_df = synthesizer.generate_sap_table(
                                 t_name,
                                 custom_rules=spec.rules,
-                                parent_df=preview_dfs[spec.parent_table]
+                                parent_df=preview_dfs[spec.parent_table],
+                                items_per_parent_range=getattr(spec, "items_per_parent_range", None)
                             )
                             preview_dfs[t_name] = child_df.head(5)
                         else:
@@ -491,7 +496,8 @@ def main_page(client: Client):
                             child_df = synthesizer.generate_sap_table(
                                 t_name,
                                 custom_rules=spec.rules,
-                                parent_df=full_dfs[spec.parent_table]
+                                parent_df=full_dfs[spec.parent_table],
+                                items_per_parent_range=getattr(spec, "items_per_parent_range", None)
                             )
                             full_dfs[t_name] = child_df
                         else:
@@ -634,8 +640,15 @@ def main_page(client: Client):
                                     if extra_sel.value:
                                         if t_name not in configs:
                                             configs[t_name] = {}
+                                        df_curr = tables.get(t_name)
                                         for extra_col in extra_sel.value:
-                                            configs[t_name][extra_col] = "company_name"
+                                            inferred_cat = SensitiveColumnDetector.detect_category_from_header(extra_col)
+                                            if not inferred_cat and df_curr is not None and extra_col in df_curr.columns:
+                                                if pd.api.types.is_numeric_dtype(df_curr[extra_col]):
+                                                    inferred_cat = "financial_amount"
+                                                else:
+                                                    inferred_cat = "company_name"
+                                            configs[t_name][extra_col] = inferred_cat or "company_name"
 
                                 if not configs:
                                     ui.notify("Please select at least one column to mask.", type="warning", position="top")

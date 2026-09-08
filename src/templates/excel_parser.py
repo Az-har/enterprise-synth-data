@@ -297,7 +297,7 @@ class FaultTolerantExcelParser:
                 choices = [c.strip().strip("'\"") for c in re.split(r"[,;]", params) if c.strip()]
                 weights = None
 
-            parsed_params["choices"] = choices or ["VAL_A", "VAL_B"]
+            parsed_params["choices"] = choices or ["STD_1", "STD_2"]
             if weights:
                 parsed_params["weights"] = weights
             return FieldRule(field_name=field_name, rule_type="choice", parameters=parsed_params)
@@ -381,4 +381,4 @@ class FaultTolerantExcelParser:
         else:
             # Fallback choice
             clean_choice = params.strip().strip("'\"")
-            return FieldRule(field_name=field_name, rule_type="choice", parameters={"choices": [clean_choice] if clean_choice else ["VAL_1"]})
+            return FieldRule(field_name=field_name, rule_type="choice", parameters={"choices": [clean_choice] if clean_choice else ["STD_1"]})

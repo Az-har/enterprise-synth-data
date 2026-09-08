@@ -1,6 +1,6 @@
 import random
 import re
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 import numpy as np
 import pandas as pd
 from faker import Faker
@@ -42,7 +42,12 @@ class DataSynthesizer:
 
     def __init__(self, catalog_manager: Optional[SAPCatalogManager] = None, seed: int = 42):
         self.catalog = catalog_manager or SAPCatalogManager()
+        self.seed = seed
         self.faker = Faker()
+        self.faker.seed_instance(seed)
+        self.rng = random.Random(seed)
+        self.np_rng = np.random.default_rng(seed)
+        # Also seed global generators for any external libraries relying on them
         Faker.seed(seed)
         random.seed(seed)
         np.random.seed(seed)
@@ -52,7 +57,8 @@ class DataSynthesizer:
         table_name: str,
         row_count: int = 100,
         custom_rules: Optional[Dict[str, FieldRule]] = None,
-        parent_df: Optional[pd.DataFrame] = None
+        parent_df: Optional[pd.DataFrame] = None,
+        items_per_parent_range: Optional[List[int]] = None
     ) -> pd.DataFrame:
         """
         Synthesizes a standard SAP table or custom entity with strict relational integrity.
@@ -84,7 +90,9 @@ class DataSynthesizer:
 
         # 1. Handle Child Table with Parent DataFrame (Relational Cascade)
         if parent_df is not None and not parent_df.empty:
-            return self._generate_child_table(table_name, schema, parent_df, custom_rules)
+            return self._generate_child_table(
+                table_name, schema, parent_df, custom_rules, items_per_parent_range=items_per_parent_range
+            )
 
         # 2. Standalone or Parent Table Generation
         for field_name, f_meta in schema.fields.items():
@@ -102,7 +110,8 @@ class DataSynthesizer:
         table_name: str,
         schema: TableSchema,
         parent_df: pd.DataFrame,
-        custom_rules: Dict[str, FieldRule]
+        custom_rules: Dict[str, FieldRule],
+        items_per_parent_range: Optional[List[int]] = None
     ) -> pd.DataFrame:
         """
         Fast vectorized generation of child line items linked to parent records.
@@ -114,8 +123,19 @@ class DataSynthesizer:
         is_vbrp = table_name.upper() == "VBRP"
 
         # Fast vectorized parent-to-child item allocation using numpy
-        # For BSEG accounting line items, guarantee >= 2 items per document for double-entry balancing
-        items_per_parent = np.random.choice([2, 4], size=len(parent_df)) if is_bseg else np.random.randint(1, 5, size=len(parent_df))
+        if items_per_parent_range and len(items_per_parent_range) == 2:
+            min_items, max_items = items_per_parent_range
+            if is_bseg:
+                # Guarantee >= 2 items per document for double-entry balancing
+                min_items = max(2, min_items)
+                max_items = max(min_items, max_items)
+            items_per_parent = self.np_rng.integers(min_items, max_items + 1, size=len(parent_df))
+        elif is_bseg:
+            # For BSEG accounting line items, guarantee >= 2 items per document for double-entry balancing
+            items_per_parent = self.np_rng.choice([2, 4], size=len(parent_df))
+        else:
+            items_per_parent = self.np_rng.integers(1, 5, size=len(parent_df))
+
         parent_indices = np.repeat(np.arange(len(parent_df)), items_per_parent)
         line_numbers = np.concatenate([np.arange(1, k + 1) for k in items_per_parent])
 
@@ -233,75 +253,75 @@ class DataSynthesizer:
         if f_meta.possible_values:
             val_choices = [pv.val for pv in f_meta.possible_values if pv.val]
             if val_choices:
-                return np.random.choice(val_choices, size=row_count)
+                return self.np_rng.choice(val_choices, size=row_count)
 
         # 2. Specific SAP Technical Key & Domain Fields
         if field_name == "MANDT":
             return np.full(row_count, "100")
         elif field_name == "BUKRS":
-            return np.random.choice(["1000", "1010", "2000", "3000"], size=row_count)
+            return self.np_rng.choice(["1000", "1010", "2000", "3000"], size=row_count)
         elif field_name == "WERKS":
-            return np.random.choice(["1000", "1100", "2000", "3000"], size=row_count)
+            return self.np_rng.choice(["1000", "1100", "2000", "3000"], size=row_count)
         elif field_name == "LGORT":
-            return np.random.choice(["0001", "0002", "0010", "FG01"], size=row_count)
+            return self.np_rng.choice(["0001", "0002", "0010", "FG01"], size=row_count)
         elif field_name == "VKORG":
-            return np.random.choice(["1000", "2000", "3000"], size=row_count)
+            return self.np_rng.choice(["1000", "2000", "3000"], size=row_count)
         elif field_name == "VTWEG":
-            return np.random.choice(["10", "20"], size=row_count)
+            return self.np_rng.choice(["10", "20"], size=row_count)
         elif field_name == "SPART":
-            return np.random.choice(["00", "01"], size=row_count)
+            return self.np_rng.choice(["00", "01"], size=row_count)
         elif field_name == "EKORG":
-            return np.random.choice(["1000", "2000"], size=row_count)
+            return self.np_rng.choice(["1000", "2000"], size=row_count)
         elif field_name == "EKGRP":
-            return np.random.choice(["001", "002", "003"], size=row_count)
+            return self.np_rng.choice(["001", "002", "003"], size=row_count)
         elif field_name == "VKBUR":
-            return np.random.choice(["1000", "1100", "2000", "2100"], size=row_count)
+            return self.np_rng.choice(["1000", "1100", "2000", "2100"], size=row_count)
         elif field_name == "VKGRP":
-            return np.random.choice(["001", "002", "003", "010"], size=row_count)
+            return self.np_rng.choice(["001", "002", "003", "010"], size=row_count)
         elif field_name == "KKBER":
-            return np.random.choice(["1000", "2000"], size=row_count)
+            return self.np_rng.choice(["1000", "2000"], size=row_count)
 
         # 3. Logistics, Shipping & Trade (Incoterms, Routes, Districts, Unloading Points)
         elif field_name == "INCO1":
-            return np.random.choice(["FOB", "CIF", "EXW", "DDP", "CFR", "CIP", "DAP"], size=row_count)
+            return self.np_rng.choice(["FOB", "CIF", "EXW", "DDP", "CFR", "CIP", "DAP"], size=row_count)
         elif field_name == "INCO2":
             inco_locations = ["Hamburg Port", "Frankfurt", "Rotterdam Port", "New York Pier 4", "Chicago Hub", "Antwerp Harbor"]
-            return np.random.choice([loc[:length] for loc in inco_locations], size=row_count)
+            return self.np_rng.choice([loc[:length] for loc in inco_locations], size=row_count)
         elif field_name == "BZIRK":
-            return np.random.choice(["000001", "000002", "000003", "US0001", "DE0001"], size=row_count)
+            return self.np_rng.choice(["000001", "000002", "000003", "US0001", "DE0001"], size=row_count)
         elif field_name in ("ABLAD", "ABLAT"):
             unloading_points = ["Dock 1 - North Ramp", "Warehouse Gate B", "Receiving Bay 3", "Logistics Terminal A", "Silo Bay 4"]
-            return np.random.choice([up[:length] for up in unloading_points], size=row_count)
+            return self.np_rng.choice([up[:length] for up in unloading_points], size=row_count)
         elif field_name in ("VSTEL", "VSTEL_BEZ"):
-            return np.random.choice(["1000", "1100", "2000", "2100"], size=row_count)
+            return self.np_rng.choice(["1000", "1100", "2000", "2100"], size=row_count)
         elif field_name in ("ROUTE", "ROUTA"):
-            return np.random.choice(["NORTH1", "SOUTH1", "TRANS1", "EUR001", "SEA001"], size=row_count)
+            return self.np_rng.choice(["NORTH1", "SOUTH1", "TRANS1", "EUR001", "SEA001"], size=row_count)
         elif field_name in ("TRAGR", "LGTOR"):
-            return np.random.choice(["0001", "0002", "0003", "D001", "D002"], size=row_count)
+            return self.np_rng.choice(["0001", "0002", "0003", "D001", "D002"], size=row_count)
         elif field_name in ("LGNUM", "BEROT"):
-            return np.random.choice(["001", "010", "100", "W01"], size=row_count)
+            return self.np_rng.choice(["001", "010", "100", "W01"], size=row_count)
         elif field_name == "LPRIO":
-            return np.random.choice(["01", "02", "03"], size=row_count)
+            return self.np_rng.choice(["01", "02", "03"], size=row_count)
         elif field_name == "VSBED":
-            return np.random.choice(["01", "02", "10"], size=row_count)
+            return self.np_rng.choice(["01", "02", "10"], size=row_count)
         elif field_name == "BOLNR":
-            return np.array([f"BOL-{random.randint(1000000, 9999999)}"[:length] for _ in range(row_count)])
+            return np.array([f"BOL-{self.rng.randint(1000000, 9999999)}"[:length] for _ in range(row_count)])
         elif field_name == "TRAID":
-            return np.array([f"CONT-{random.randint(1000, 9999)}"[:length] for _ in range(row_count)])
+            return np.array([f"CONT-{self.rng.randint(1000, 9999)}"[:length] for _ in range(row_count)])
         elif field_name in ("AUTLF", "KZAZU"):
-            return np.random.choice([" ", "X"], size=row_count, p=[0.7, 0.3])
+            return self.np_rng.choice([" ", "X"], size=row_count, p=[0.7, 0.3])
         elif field_name in ("LIFSK", "FAKSP"):
-            return np.random.choice([" ", "01", "02"], size=row_count, p=[0.85, 0.1, 0.05])
+            return self.np_rng.choice([" ", "01", "02"], size=row_count, p=[0.85, 0.1, 0.05])
 
         # 4. Material Numbers (MATNR) - Standard 18-digit SAP ALPHA format
         elif field_name == "MATNR":
             mat_pool = [f"{100000 + i:0{min(length, 18)}d}" for i in range(30)]
-            return np.random.choice(mat_pool, size=row_count)
+            return self.np_rng.choice(mat_pool, size=row_count)
 
         # 5. Customer / Vendor / Partner Technical IDs
         elif any(field_name.startswith(p) for p in ("KUN", "LIF")) or field_name in ("EMPFG", "KNKLI", "PARNR", "KUNAG", "KUNWE", "KUNRE", "KUNRG", "KUNIV", "LIFRE"):
             id_len = min(length, 10)
-            return np.array([f"{random.randint(100000, 999999):0{id_len}d}" for _ in range(row_count)])
+            return np.array([f"{self.rng.randint(100000, 999999):0{id_len}d}" for _ in range(row_count)])
 
         # 6. Document Numbers & References
         elif any(field_name.endswith(s) for s in ("BELN", "ELN", "BLNR", "UFNR", "KNUM", "ANFN", "GBEL", "XNUM", "NUMV", "NUMH")) or field_name in ("BELNR", "VBELN", "EBELN", "MBLNR", "AUFNR", "TKNUM", "BANFN", "VGBEL", "EXNUM", "KNUMV"):
@@ -320,72 +340,72 @@ class DataSynthesizer:
         elif ((dtype == "DATS" or bool(re.search(r"(?:_DAT$|_DATE$|^[A-Z0-9]{0,3}DAT[A-Z0-9]?$|^[A-Z0-9]{0,3}DT$|ERDAT|AEDAT|BLDAT|BUDAT|WADAT|FKDAT|AUDAT|BEDAT|CPUDT)", field_name)))
               and field_name not in ("MANDAT", "DATA", "CANDIDATE", "METADATA", "STAT")):
             base_ts = pd.Timestamp.now()
-            days_offset = np.random.randint(0, 90, size=row_count)
+            days_offset = self.np_rng.integers(0, 90, size=row_count)
             return np.array([(base_ts - pd.Timedelta(days=int(d))).strftime("%Y%m%d") for d in days_offset])
 
         # 9. Times: Universal match for ANY SAP time field
         elif "ZET" in field_name or "TIM" in field_name or "UHR" in field_name or field_name.endswith("TM") or dtype == "TIMS":
-            hours = np.random.randint(8, 18, size=row_count)
-            mins = np.random.randint(0, 60, size=row_count)
-            secs = np.random.randint(0, 60, size=row_count)
+            hours = self.np_rng.integers(8, 18, size=row_count)
+            mins = self.np_rng.integers(0, 60, size=row_count)
+            secs = self.np_rng.integers(0, 60, size=row_count)
             return np.array([f"{h:02d}{m:02d}{s:02d}" for h, m, s in zip(hours, mins, secs)])
 
         # 10. Statuses & Processing Confirmation Codes
         elif field_name in ("KOSTK", "WBSTK", "FKSTK", "GBSTK", "UVALL", "UVALS", "UVFAK", "UVVLK", "PKSTK", "BSTAT", "BESTQ", "KZVBR"):
-            return np.random.choice(["A", "B", "C"], size=row_count, p=[0.5, 0.3, 0.2])
+            return self.np_rng.choice(["A", "B", "C"], size=row_count, p=[0.5, 0.3, 0.2])
 
         # 11. Currencies, Units of Measure, Languages
         elif field_name in ("WAERS", "WAERK", "HWAER") or dtype == "CUKY":
-            return np.random.choice(["EUR", "USD", "GBP"], size=row_count, p=[0.6, 0.3, 0.1])
+            return self.np_rng.choice(["EUR", "USD", "GBP"], size=row_count, p=[0.6, 0.3, 0.1])
         elif field_name in ("MEINS", "VRKME", "GEWEI", "VOLEH") or dtype == "UNIT":
             units = [u[:length] for u in ["PC", "KG", "M", "L", "ST"]]
-            return np.random.choice(units, size=row_count, p=[0.4, 0.25, 0.15, 0.1, 0.1])
+            return self.np_rng.choice(units, size=row_count, p=[0.4, 0.25, 0.15, 0.1, 0.1])
         elif field_name in ("SPRAS", "LANG") or dtype == "LANG":
             langs = [l[:length] for l in ["E", "D", "F", "ES"]]
-            return np.random.choice(langs, size=row_count, p=[0.7, 0.15, 0.1, 0.05])
+            return self.np_rng.choice(langs, size=row_count, p=[0.7, 0.15, 0.1, 0.05])
 
         # 12. Document & Posting Types
         elif field_name == "AUART":
-            return np.random.choice(["OR", "ZOR", "QT", "RE"], size=row_count, p=[0.7, 0.15, 0.1, 0.05])
+            return self.np_rng.choice(["OR", "ZOR", "QT", "RE"], size=row_count, p=[0.7, 0.15, 0.1, 0.05])
         elif field_name == "BLART":
-            return np.random.choice(["KR", "SA", "KZ", "DR", "DZ"], size=row_count, p=[0.4, 0.3, 0.1, 0.1, 0.1])
+            return self.np_rng.choice(["KR", "SA", "KZ", "DR", "DZ"], size=row_count, p=[0.4, 0.3, 0.1, 0.1, 0.1])
         elif field_name == "BSART":
-            return np.random.choice(["NB", "UB", "FO"], size=row_count, p=[0.8, 0.15, 0.05])
+            return self.np_rng.choice(["NB", "UB", "FO"], size=row_count, p=[0.8, 0.15, 0.05])
         elif field_name == "LFART":
-            return np.random.choice(["LF", "LR", "NL"], size=row_count)
+            return self.np_rng.choice(["LF", "LR", "NL"], size=row_count)
         elif field_name == "FKART":
-            return np.random.choice(["F2", "RE", "S1"], size=row_count)
+            return self.np_rng.choice(["F2", "RE", "S1"], size=row_count)
         elif field_name == "BSCHL":
-            return np.random.choice(["01", "11", "40", "50"], size=row_count)
+            return self.np_rng.choice(["01", "11", "40", "50"], size=row_count)
         elif field_name == "KOART":
-            return np.random.choice(["S", "D", "K"], size=row_count, p=[0.5, 0.3, 0.2])
+            return self.np_rng.choice(["S", "D", "K"], size=row_count, p=[0.5, 0.3, 0.2])
         elif field_name == "SHKZG":
-            return np.random.choice(["S", "H"], size=row_count, p=[0.6, 0.4])
+            return self.np_rng.choice(["S", "H"], size=row_count, p=[0.6, 0.4])
         elif field_name == "MWSKZ":
-            return np.random.choice(["V1", "V2", "A1", "A2", "I0"], size=row_count, p=[0.5, 0.2, 0.15, 0.1, 0.05])
+            return self.np_rng.choice(["V1", "V2", "A1", "A2", "I0"], size=row_count, p=[0.5, 0.2, 0.15, 0.1, 0.05])
         elif field_name == "ZLSPR":
-            return np.random.choice([" ", "A", "B"], size=row_count, p=[0.88, 0.1, 0.02])
+            return self.np_rng.choice([" ", "A", "B"], size=row_count, p=[0.88, 0.1, 0.02])
         elif field_name == "ZLSCH":
-            return np.random.choice(["T", "C", "U", "E"], size=row_count, p=[0.5, 0.3, 0.1, 0.1])
+            return self.np_rng.choice(["T", "C", "U", "E"], size=row_count, p=[0.5, 0.3, 0.1, 0.1])
         elif field_name == "ZTERM":
-            return np.random.choice(["0001", "0002", "NT30", "PT60"], size=row_count)
+            return self.np_rng.choice(["0001", "0002", "NT30", "PT60"], size=row_count)
         elif field_name in ("USNAM", "ERNAM", "AENAM"):
-            return np.random.choice(["SYS_BATCH", "CONSULTANT_A", "FIN_ADMIN", "SAP_USER"], size=row_count)
+            return self.np_rng.choice(["SYS_BATCH", "CONSULTANT_A", "FIN_ADMIN", "SAP_USER"], size=row_count)
         elif field_name == "GJAHR":
-            return np.random.choice(["2024", "2025", "2026"], size=row_count)
+            return self.np_rng.choice(["2024", "2025", "2026"], size=row_count)
 
         # 13. Financial Amounts & Quantities
         elif dtype in ("CURR", "DEC", "QUAN") or any(field_name.startswith(p) for p in ("WRB", "DMB", "NET", "MEN", "LFM", "LGM", "KWM", "FKI", "BRG", "NTG", "VOL")):
-            amounts = np.random.lognormal(mean=5.5, sigma=1.0, size=row_count)
+            amounts = self.np_rng.lognormal(mean=5.5, sigma=1.0, size=row_count)
             return np.round(amounts, 2)
         elif dtype in ("INT1", "INT2", "INT4", "INT8"):
-            return np.random.randint(1, 100, size=row_count)
+            return self.np_rng.integers(1, 100, size=row_count)
         elif dtype == "FLTP":
-            return np.round(np.random.uniform(1.0, 1000.0, size=row_count), 4)
+            return np.round(self.np_rng.uniform(1.0, 1000.0, size=row_count), 4)
 
         # 14. Boolean / Single Character Flags
         elif length == 1:
-            return np.random.choice([" ", "X"], size=row_count, p=[0.85, 0.15])
+            return self.np_rng.choice([" ", "X"], size=row_count, p=[0.85, 0.15])
 
         # 15. Names, Addresses, Descriptions
         elif any(kw in field_name for kw in ("NAME", "SORTL")):
@@ -395,13 +415,13 @@ class DataSynthesizer:
         elif any(kw in field_name for kw in ("STRAS", "STREET")):
             return np.array([self.faker.street_address()[:length] for _ in range(row_count)])
         elif any(kw in field_name for kw in ("PSTLZ", "POST_CODE")):
-            return np.array([f"{random.randint(10000, 99999)}"[:length] for _ in range(row_count)])
+            return np.array([f"{self.rng.randint(10000, 99999)}"[:length] for _ in range(row_count)])
         elif field_name in ("LAND1", "COUNTRY"):
             countries = [c[:length] for c in ["DE", "US", "FR", "GB", "NL"]]
-            return np.random.choice(countries, size=row_count)
+            return self.np_rng.choice(countries, size=row_count)
         elif field_name in ("REGIO", "STATE"):
             regions = [r[:length] for r in ["01", "08", "CA", "NY", "TX", "BY"]]
-            return np.random.choice(regions, size=row_count)
+            return self.np_rng.choice(regions, size=row_count)
         elif any(kw in field_name for kw in ("TEXT", "DESC", "BEZEI", "ARKTX", "MAKTX")):
             sample_descs = [
                 "Standard Industrial Assembly", "Heavy Duty Roller Bearing",
@@ -409,21 +429,21 @@ class DataSynthesizer:
                 "Reinforced Rubber Gasket", "Hex Head Flange Bolt M10",
                 "Hydraulic Control Valve", "Modular Steel Frame"
             ]
-            return np.random.choice([d[:length] for d in sample_descs], size=row_count)
+            return self.np_rng.choice([d[:length] for d in sample_descs], size=row_count)
 
         # 16. Intelligent Zero-VAL Fallback based on Length & Datatype
         elif dtype == "NUMC":
             max_val = min(10**length - 1, 99999999)
-            return np.array([f"{random.randint(1, max_val):0{length}d}" for _ in range(row_count)])
+            return np.array([f"{self.rng.randint(1, max_val):0{length}d}" for _ in range(row_count)])
         elif length == 2:
-            return np.random.choice(["01", "02", "10", "20", "AA", "BB"], size=row_count)
+            return self.np_rng.choice(["01", "02", "10", "20", "AA", "BB"], size=row_count)
         elif length == 3:
-            return np.random.choice(["A01", "B02", "C10", "100", "200"], size=row_count)
+            return self.np_rng.choice(["A01", "B02", "C10", "100", "200"], size=row_count)
         elif length == 4:
-            return np.random.choice(["1000", "2000", "3000", "STD1", "GEN1"], size=row_count)
+            return self.np_rng.choice(["1000", "2000", "3000", "STD1", "GEN1"], size=row_count)
         else:
             # Clean enterprise code
-            return np.random.choice([f"STD_{100 + i}"[:length] for i in range(10)], size=row_count)
+            return self.np_rng.choice([f"STD_{100 + i}"[:length] for i in range(10)], size=row_count)
 
     def _generate_from_rule(self, rule: FieldRule, row_count: int, f_meta: Any) -> np.ndarray:
         """Executes a custom rule across N rows."""
@@ -433,12 +453,18 @@ class DataSynthesizer:
         if rtype == "choice":
             choices = p.get("choices") or p.get("values") or ["STD_1", "STD_2"]
             weights = p.get("weights")
-            return np.random.choice(choices, size=row_count, p=weights)
+            if weights and len(weights) == len(choices):
+                w_arr = np.array(weights, dtype=float)
+                w_sum = w_arr.sum()
+                if w_sum > 0:
+                    w_arr = w_arr / w_sum
+                    return self.np_rng.choice(choices, size=row_count, p=w_arr)
+            return self.np_rng.choice(choices, size=row_count)
         elif rtype == "range":
             min_v = p.get("min", 1.0)
             max_v = p.get("max", 1000.0)
             decimals = p.get("decimals", 2)
-            vals = np.random.uniform(min_v, max_v, size=row_count)
+            vals = self.np_rng.uniform(min_v, max_v, size=row_count)
             return np.round(vals, decimals) if decimals > 0 else np.round(vals).astype(int)
         elif rtype == "fixed":
             return np.full(row_count, p.get("value", ""))
@@ -476,7 +502,7 @@ class DataSynthesizer:
             else:
                 pool = [self.faker.word() for _ in range(pool_size)]
 
-            return np.random.choice(pool, size=row_count) if row_count > pool_size else np.array(pool[:row_count])
+            return self.np_rng.choice(pool, size=row_count) if row_count > pool_size else np.array(pool[:row_count])
         else:
             return self._generate_default_field("", rule.field_name, f_meta, row_count)
 
@@ -485,7 +511,8 @@ class DataSynthesizer:
         parent_table: str,
         child_table: str,
         parent_count: int = 100,
-        custom_rules: Optional[Dict[str, Dict[str, FieldRule]]] = None
+        custom_rules: Optional[Dict[str, Dict[str, FieldRule]]] = None,
+        items_per_parent_range: Optional[List[int]] = None
     ) -> Dict[str, pd.DataFrame]:
         """
         Generates a complete relational pair (e.g. BKPF + BSEG or VBAK + VBAP)
@@ -500,6 +527,7 @@ class DataSynthesizer:
         child_df = self.generate_sap_table(
             child_table,
             custom_rules=custom_rules.get(child_table),
-            parent_df=parent_df
+            parent_df=parent_df,
+            items_per_parent_range=items_per_parent_range
         )
         return {parent_table: parent_df, child_table: child_df}
