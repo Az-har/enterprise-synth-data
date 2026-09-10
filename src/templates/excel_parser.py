@@ -14,6 +14,7 @@ COLUMN_ALIASES = {
     "table_name": ["table_name", "table", "tablename", "table name", "entity", "target_table"],
     "row_count": ["row_count", "rows", "count", "num_rows", "row count", "records"],
     "parent_table": ["parent_table", "parent", "parent table", "header_table", "master_table"],
+    "items_per_parent": ["items_per_parent", "items_per_header", "multiplicity", "items", "items_range", "child_ratio", "ratio"],
     "field_name": ["field_name", "field", "fieldname", "column", "column_name", "col", "attribute"],
     "rule_type": ["rule_type", "type", "rule", "generator", "method"],
     "parameters": ["parameters", "params", "values", "rules", "parameters / values", "config", "args"]
@@ -43,137 +44,121 @@ class FaultTolerantExcelParser:
         }
 
         try:
-            excel_file = pd.ExcelFile(file_path_or_bytes)
-        except Exception as e:
-            audit["valid"] = False
-            audit["warnings"].append(f"Failed to read Excel workbook: {str(e)}")
-            return ({}, audit)
+            with pd.ExcelFile(file_path_or_bytes) as excel_file:
+                sheet_names = [s.strip() for s in excel_file.sheet_names]
+                audit["sheets_found"] = sheet_names
 
-        sheet_names = [s.strip() for s in excel_file.sheet_names]
-        audit["sheets_found"] = sheet_names
+                # 1. Identify Table_Definitions sheet
+                table_sheet = self._find_sheet(sheet_names, ["table_definitions", "tables", "table_config", "entities", "sheet1"])
+                df_tables = self._read_sheet_with_header_detection(excel_file, table_sheet) if table_sheet else pd.DataFrame()
 
-        # 1. Identify Table_Definitions sheet
-        table_sheet = self._find_sheet(sheet_names, ["table_definitions", "tables", "table_config", "entities", "sheet1"])
-        df_tables = self._read_sheet_with_header_detection(excel_file, table_sheet) if table_sheet else pd.DataFrame()
+                # 2. Identify Field_Rules sheet
+                rules_sheet = self._find_sheet(sheet_names, ["field_rules", "rules", "fields", "columns", "sheet2"])
+                df_rules = self._read_sheet_with_header_detection(excel_file, rules_sheet) if rules_sheet else pd.DataFrame()
 
-        # 2. Identify Field_Rules sheet
-        rules_sheet = self._find_sheet(sheet_names, ["field_rules", "rules", "fields", "columns", "sheet2"])
-        df_rules = self._read_sheet_with_header_detection(excel_file, rules_sheet) if rules_sheet else pd.DataFrame()
+                specs: Dict[str, TableGenerationSpec] = {}
 
-        specs: Dict[str, TableGenerationSpec] = {}
+                # 3. Parse tables from df_tables if available
+                if not df_tables.empty:
+                    tbl_col = self._match_alias(df_tables.columns, "table_name")
+                    cnt_col = self._match_alias(df_tables.columns, "row_count")
+                    parent_col = self._match_alias(df_tables.columns, "parent_table")
+                    items_range_col = self._match_alias(df_tables.columns, "items_per_parent")
 
-        # 3. Parse tables from df_tables if available
-        if not df_tables.empty:
-            tbl_col = self._match_alias(df_tables.columns, "table_name")
-            cnt_col = self._match_alias(df_tables.columns, "row_count")
-            parent_col = self._match_alias(df_tables.columns, "parent_table")
+                    for _, r in df_tables.iterrows():
+                        if tbl_col and pd.notna(r[tbl_col]):
+                            t_name = str(r[tbl_col]).strip().upper()
+                            if not t_name or t_name.startswith("#"):
+                                continue
 
-            for _, r in df_tables.iterrows():
-                if tbl_col and pd.notna(r[tbl_col]):
-                    t_name = str(r[tbl_col]).strip().upper()
-                    if not t_name or t_name.startswith("#"):
-                        continue
+                            # Parse parent table
+                            parent_tbl = None
+                            if parent_col and pd.notna(r[parent_col]):
+                                p_val = str(r[parent_col]).strip().upper()
+                                if p_val and p_val not in ("NAN", "NONE", ""):
+                                    parent_tbl = p_val
 
-                    # Parse row count
-                    row_cnt = 100
-                    if cnt_col and pd.notna(r[cnt_col]):
-                        try:
-                            val_str = str(r[cnt_col]).strip()
-                            row_cnt = int(float(val_str))
-                        except Exception:
-                            digits = re.sub(r"[^\d]", "", str(r[cnt_col]).split(".")[0])
-                            row_cnt = int(digits) if digits else 100
+                            # Parse row count & items_per_parent_range
+                            row_cnt = 100
+                            items_range = None
 
-                    # Parse parent table
-                    parent_tbl = None
-                    if parent_col and pd.notna(r[parent_col]):
-                        p_val = str(r[parent_col]).strip().upper()
-                        if p_val and p_val not in ("NAN", "NONE", ""):
-                            parent_tbl = p_val
+                            # Check explicit items_per_parent column if present
+                            if items_range_col and pd.notna(r[items_range_col]):
+                                range_str = str(r[items_range_col]).strip()
+                                rmatch = re.search(r"(\d+)\s*(?:-|to|\.\.)\s*(\d+)", range_str)
+                                if rmatch:
+                                    i1, i2 = int(rmatch.group(1)), int(rmatch.group(2))
+                                    items_range = [min(i1, i2), max(i1, i2)]
+                                else:
+                                    digits = re.sub(r"[^\d]", "", range_str)
+                                    if digits:
+                                        items_range = [int(digits), int(digits)]
 
-                    specs[t_name] = TableGenerationSpec(
-                        table_name=t_name,
-                        row_count=max(1, row_cnt),
-                        parent_table=parent_tbl
-                    )
-                    if t_name not in audit["tables_found"]:
-                        audit["tables_found"].append(t_name)
+                            # If row_count column has range syntax (e.g. '1-4' or '2..5' for child tables)
+                            if cnt_col and pd.notna(r[cnt_col]):
+                                val_str = str(r[cnt_col]).strip()
+                                rmatch = re.search(r"(\d+)\s*(?:-|to|\.\.)\s*(\d+)", val_str)
+                                if rmatch and parent_tbl:
+                                    i1, i2 = int(rmatch.group(1)), int(rmatch.group(2))
+                                    items_range = [min(i1, i2), max(i1, i2)]
+                                    row_cnt = 100
+                                else:
+                                    try:
+                                        row_cnt = int(float(val_str))
+                                    except Exception:
+                                        digits = re.sub(r"[^\d]", "", val_str.split(".")[0])
+                                        row_cnt = int(digits) if digits else 100
 
-            # If df_tables ALSO contains field_name column, parse rules from it too
-            fld_in_tables = self._match_alias(df_tables.columns, "field_name")
-            if fld_in_tables:
-                rule_col = self._match_alias(df_tables.columns, "rule_type")
-                param_col = self._match_alias(df_tables.columns, "parameters")
-                default_table = table_sheet.strip().upper() if table_sheet else "DATA_TABLE"
-
-                for _, r in df_tables.iterrows():
-                    if pd.notna(r[fld_in_tables]):
-                        f_name = str(r[fld_in_tables]).strip().upper()
-                        if not f_name or f_name.startswith("#"):
-                            continue
-                        t_name = str(r[tbl_col]).strip().upper() if tbl_col and pd.notna(r[tbl_col]) else default_table
-                        r_type = str(r[rule_col]).strip().lower() if rule_col and pd.notna(r[rule_col]) else "choice"
-                        params_raw = str(r[param_col]).strip() if param_col and pd.notna(r[param_col]) else ""
-
-                        if t_name not in specs:
-                            specs[t_name] = TableGenerationSpec(table_name=t_name, row_count=100)
+                            specs[t_name] = TableGenerationSpec(
+                                table_name=t_name,
+                                row_count=max(1, row_cnt),
+                                parent_table=parent_tbl,
+                                items_per_parent_range=items_range
+                            )
                             if t_name not in audit["tables_found"]:
                                 audit["tables_found"].append(t_name)
 
-                        parsed_rule = self._parse_rule_string(f_name, r_type, params_raw)
-                        specs[t_name].rules[f_name] = parsed_rule
-                        audit["rules_applied"] += 1
+                    # If df_tables ALSO contains field_name column, parse rules from it too
+                    fld_in_tables = self._match_alias(df_tables.columns, "field_name")
+                    if fld_in_tables:
+                        rule_col = self._match_alias(df_tables.columns, "rule_type")
+                        param_col = self._match_alias(df_tables.columns, "parameters")
+                        default_table = table_sheet.strip().upper() if table_sheet else "DATA_TABLE"
 
-        # 4. If rules sheet identified, parse rules
-        if not df_rules.empty:
-            tbl_col = self._match_alias(df_rules.columns, "table_name")
-            fld_col = self._match_alias(df_rules.columns, "field_name")
-            rule_col = self._match_alias(df_rules.columns, "rule_type")
-            param_col = self._match_alias(df_rules.columns, "parameters")
+                        for _, r in df_tables.iterrows():
+                            if pd.notna(r[fld_in_tables]):
+                                f_name = str(r[fld_in_tables]).strip().upper()
+                                if not f_name or f_name.startswith("#"):
+                                    continue
+                                t_name = str(r[tbl_col]).strip().upper() if tbl_col and pd.notna(r[tbl_col]) else default_table
+                                r_type = str(r[rule_col]).strip().lower() if rule_col and pd.notna(r[rule_col]) else "choice"
+                                params_raw = str(r[param_col]).strip() if param_col and pd.notna(r[param_col]) else ""
 
-            # If no table_name column in rules sheet, use rules_sheet name as table name
-            default_table = rules_sheet.strip().upper() if rules_sheet else "DATA_TABLE"
+                                if t_name not in specs:
+                                    specs[t_name] = TableGenerationSpec(table_name=t_name, row_count=100)
+                                    if t_name not in audit["tables_found"]:
+                                        audit["tables_found"].append(t_name)
 
-            for _, r in df_rules.iterrows():
-                if fld_col and pd.notna(r[fld_col]):
-                    f_name = str(r[fld_col]).strip().upper()
-                    if not f_name or f_name.startswith("#"):
-                        continue
+                                parsed_rule = self._parse_rule_string(f_name, r_type, params_raw)
+                                specs[t_name].rules[f_name] = parsed_rule
+                                audit["rules_applied"] += 1
 
-                    t_name = str(r[tbl_col]).strip().upper() if tbl_col and pd.notna(r[tbl_col]) else default_table
-                    r_type = str(r[rule_col]).strip().lower() if rule_col and pd.notna(r[rule_col]) else "choice"
-                    params_raw = str(r[param_col]).strip() if param_col and pd.notna(r[param_col]) else ""
+                # 4. If rules sheet identified, parse rules
+                if not df_rules.empty:
+                    tbl_col = self._match_alias(df_rules.columns, "table_name")
+                    fld_col = self._match_alias(df_rules.columns, "field_name")
+                    rule_col = self._match_alias(df_rules.columns, "rule_type")
+                    param_col = self._match_alias(df_rules.columns, "parameters")
 
-                    if t_name not in specs:
-                        specs[t_name] = TableGenerationSpec(table_name=t_name, row_count=100)
-                        if t_name not in audit["tables_found"]:
-                            audit["tables_found"].append(t_name)
+                    default_table = rules_sheet.strip().upper() if rules_sheet else "DATA_TABLE"
 
-                    parsed_rule = self._parse_rule_string(f_name, r_type, params_raw)
-                    specs[t_name].rules[f_name] = parsed_rule
-                    audit["rules_applied"] += 1
-
-        # 5. Deep Scan Fallback: If no specs or no rules applied yet, inspect EVERY sheet in workbook
-        if not specs or audit["rules_applied"] == 0:
-            for s_name in sheet_names:
-                if s_name == table_sheet and not df_tables.empty and fld_in_tables:
-                    continue  # Already parsed above
-                df_s = self._read_sheet_with_header_detection(excel_file, s_name)
-                if df_s.empty:
-                    continue
-
-                tbl_col = self._match_alias(df_s.columns, "table_name")
-                fld_col = self._match_alias(df_s.columns, "field_name")
-                rule_col = self._match_alias(df_s.columns, "rule_type")
-                param_col = self._match_alias(df_s.columns, "parameters")
-
-                if fld_col:
-                    # Found a rules sheet in an arbitrary sheet!
-                    t_name_default = s_name.strip().upper()
-                    for _, r in df_s.iterrows():
-                        if pd.notna(r[fld_col]):
+                    for _, r in df_rules.iterrows():
+                        if fld_col and pd.notna(r[fld_col]):
                             f_name = str(r[fld_col]).strip().upper()
-                            t_name = str(r[tbl_col]).strip().upper() if tbl_col and pd.notna(r[tbl_col]) else t_name_default
+                            if not f_name or f_name.startswith("#"):
+                                continue
+
+                            t_name = str(r[tbl_col]).strip().upper() if tbl_col and pd.notna(r[tbl_col]) else default_table
                             r_type = str(r[rule_col]).strip().lower() if rule_col and pd.notna(r[rule_col]) else "choice"
                             params_raw = str(r[param_col]).strip() if param_col and pd.notna(r[param_col]) else ""
 
@@ -186,30 +171,65 @@ class FaultTolerantExcelParser:
                             specs[t_name].rules[f_name] = parsed_rule
                             audit["rules_applied"] += 1
 
-        # 6. Sample Data Fallback: If still no specs, treat sheet columns as table fields
-        if not specs and sheet_names:
-            for s_name in sheet_names:
-                df_raw = pd.read_excel(excel_file, sheet_name=s_name)
-                cols = [str(c).strip().upper() for c in df_raw.columns if not str(c).startswith("Unnamed:")]
-                if cols and len(cols) >= 2:
-                    t_name = s_name.strip().upper()
-                    if t_name in ("SHEET1", "DATA", "SPEC"):
-                        # Infer from first column if it resembles SAP key (e.g. MANDT, VBELN)
-                        t_name = "VBAK" if "VBELN" in cols else "BKPF" if "BELNR" in cols else "SAP_TABLE"
-                    specs[t_name] = TableGenerationSpec(table_name=t_name, row_count=100)
-                    audit["tables_found"].append(t_name)
-                    for col_name in cols:
-                        specs[t_name].rules[col_name] = self._parse_rule_string(col_name, "choice", "")
-                        audit["rules_applied"] += 1
-                    break
+                # 5. Deep Scan Fallback: If no specs or no rules applied yet, inspect EVERY sheet in workbook
+                if not specs or audit["rules_applied"] == 0:
+                    for s_name in sheet_names:
+                        if s_name == table_sheet and not df_tables.empty and fld_in_tables:
+                            continue  # Already parsed above
+                        df_s = self._read_sheet_with_header_detection(excel_file, s_name)
+                        if df_s.empty:
+                            continue
 
-        if not specs:
+                        tbl_col = self._match_alias(df_s.columns, "table_name")
+                        fld_col = self._match_alias(df_s.columns, "field_name")
+                        rule_col = self._match_alias(df_s.columns, "rule_type")
+                        param_col = self._match_alias(df_s.columns, "parameters")
+
+                        if fld_col:
+                            t_name_default = s_name.strip().upper()
+                            for _, r in df_s.iterrows():
+                                if pd.notna(r[fld_col]):
+                                    f_name = str(r[fld_col]).strip().upper()
+                                    t_name = str(r[tbl_col]).strip().upper() if tbl_col and pd.notna(r[tbl_col]) else t_name_default
+                                    r_type = str(r[rule_col]).strip().lower() if rule_col and pd.notna(r[rule_col]) else "choice"
+                                    params_raw = str(r[param_col]).strip() if param_col and pd.notna(r[param_col]) else ""
+
+                                    if t_name not in specs:
+                                        specs[t_name] = TableGenerationSpec(table_name=t_name, row_count=100)
+                                        if t_name not in audit["tables_found"]:
+                                            audit["tables_found"].append(t_name)
+
+                                    parsed_rule = self._parse_rule_string(f_name, r_type, params_raw)
+                                    specs[t_name].rules[f_name] = parsed_rule
+                                    audit["rules_applied"] += 1
+
+                # 6. Sample Data Fallback: If still no specs, treat sheet columns as table fields
+                if not specs and sheet_names:
+                    for s_name in sheet_names:
+                        df_raw = pd.read_excel(excel_file, sheet_name=s_name)
+                        cols = [str(c).strip().upper() for c in df_raw.columns if not str(c).startswith("Unnamed:")]
+                        if cols and len(cols) >= 2:
+                            t_name = s_name.strip().upper()
+                            if t_name in ("SHEET1", "DATA", "SPEC"):
+                                detected_tbl = self._match_sap_table_from_columns(cols)
+                                if detected_tbl:
+                                    t_name = detected_tbl
+
+                            if t_name not in specs:
+                                specs[t_name] = TableGenerationSpec(table_name=t_name, row_count=100)
+                                if t_name not in audit["tables_found"]:
+                                    audit["tables_found"].append(t_name)
+
+                            for col in cols:
+                                rule = self._infer_rule_for_column(t_name, col)
+                                specs[t_name].rules[col] = rule
+                                audit["rules_applied"] += 1
+
+                return (specs, audit)
+        except Exception as e:
             audit["valid"] = False
-            audit["warnings"].append(f"Sheets detected: {sheet_names}. Could not locate table or field specification columns.")
-            audit["warnings"].append("Expected columns: 'Table_Name', 'Field_Name', 'Rule_Type', 'Parameters'.")
-            audit["warnings"].append("Tip: Use the pre-formatted Excel template provided on the studio card.")
-
-        return (specs, audit)
+            audit["warnings"].append(f"Failed to read Excel workbook: {str(e)}")
+            return ({}, audit)
 
     def _read_sheet_with_header_detection(self, excel_file: pd.ExcelFile, sheet_name: str) -> pd.DataFrame:
         """Reads an Excel sheet and automatically locates the header row within the first 6 rows."""
@@ -232,9 +252,11 @@ class FaultTolerantExcelParser:
                     break
 
             if found_header:
-                df = pd.read_excel(excel_file, sheet_name=sheet_name, skiprows=header_row_idx)
+                df = df_raw.iloc[header_row_idx + 1:].reset_index(drop=True)
+                df.columns = df_raw.iloc[header_row_idx].tolist()
             else:
-                df = pd.read_excel(excel_file, sheet_name=sheet_name)
+                df = df_raw.iloc[1:].reset_index(drop=True)
+                df.columns = df_raw.iloc[0].tolist()
 
             return self._normalize_dataframe_headers(df)
         except Exception:

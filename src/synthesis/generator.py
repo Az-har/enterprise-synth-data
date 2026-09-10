@@ -8,6 +8,25 @@ from ..catalog.sap_catalog import SAPCatalogManager
 from ..catalog.schema_models import TableSchema, FieldMeta
 from .rules import FieldRule
 
+# Precompiled date regex for ultra-fast SAP date identification
+SAP_DATE_REGEX = re.compile(
+    r"(?:_DAT$|_DATE$|^[A-Z0-9]{0,3}DAT[A-Z0-9]?$|^[A-Z0-9]{0,3}DT$|ERDAT|AEDAT|BLDAT|BUDAT|WADAT|FKDAT|AUDAT|BEDAT|CPUDT)"
+)
+
+# Candidate header identifier columns to cascade across relational tables
+HEADER_KEY_CANDIDATES = frozenset({
+    "MANDT", "BUKRS", "BELNR", "GJAHR", "VBELN", "EBELN", "TKNUM",
+    "MBLNR", "AUFNR", "KUNNR", "LIFNR", "ID", "ORDER_ID", "DOC_ID", "HEADER_ID"
+})
+
+# Protected line-item columns that must never be overwritten by parent header columns
+PROTECTED_ITEM_COLS = frozenset({
+    "NETWR", "WRBTR", "DMBTR", "MENGE", "KWMENG", "LFIMG", "POSNR", "BUZEI",
+    "EBELP", "ZEILE", "MATNR", "ARKTX", "WERKS", "LGORT", "SHKZG", "ERDAT", "AEDAT",
+    "STATUS", "DESCRIPTION", "DESC", "COMMENT", "COMMENTS", "NOTE", "NOTES",
+    "PRICE", "UNIT_PRICE", "TOTAL", "LINE_TOTAL"
+})
+
 
 def sort_specs_topologically(specs_dict: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -168,23 +187,28 @@ class DataSynthesizer:
             child_df["SHKZG"] = ["S" if idx % 2 == 1 else "H" for idx in line_numbers]
 
             # DEF-13: Balanced double-entry accounting per document
-            # Guarantees sum(Debit 'S') == sum(Credit 'H') per BELNR
+            # Guarantees sum(Debit 'S') == sum(Credit 'H') per BELNR (O(N) slice-vectorized)
             if "WRBTR" in child_df.columns:
+                wrbtr_arr = child_df["WRBTR"].to_numpy(copy=True)
+                starts = np.zeros(len(items_per_parent) + 1, dtype=int)
+                starts[1:] = np.cumsum(items_per_parent)
+
                 for p_idx in range(len(parent_df)):
-                    doc_mask = parent_indices == p_idx
-                    doc_indices = np.where(doc_mask)[0]
-                    if len(doc_indices) >= 2:
-                        s_indices = [i for i in doc_indices if child_df.at[i, "SHKZG"] == "S"]
-                        h_indices = [i for i in doc_indices if child_df.at[i, "SHKZG"] == "H"]
-                        if s_indices and h_indices:
-                            s_sum = round(float(child_df.loc[s_indices, "WRBTR"].sum()), 2)
-                            h_base = round(s_sum / len(h_indices), 2)
-                            for h_i in h_indices[:-1]:
-                                child_df.at[h_i, "WRBTR"] = h_base
-                            child_df.at[h_indices[-1], "WRBTR"] = round(s_sum - (h_base * (len(h_indices) - 1)), 2)
-                            if "DMBTR" in child_df.columns:
-                                for i in doc_indices:
-                                    child_df.at[i, "DMBTR"] = child_df.at[i, "WRBTR"]
+                    s_idx = starts[p_idx]
+                    e_idx = starts[p_idx + 1]
+                    if e_idx - s_idx >= 2:
+                        s_offsets = list(range(s_idx, e_idx, 2))
+                        h_offsets = list(range(s_idx + 1, e_idx, 2))
+                        if s_offsets and h_offsets:
+                            s_sum = round(float(np.sum(wrbtr_arr[s_offsets])), 2)
+                            h_base = round(s_sum / len(h_offsets), 2)
+                            for h_i in h_offsets[:-1]:
+                                wrbtr_arr[h_i] = h_base
+                            wrbtr_arr[h_offsets[-1]] = round(s_sum - (h_base * (len(h_offsets) - 1)), 2)
+
+                child_df["WRBTR"] = wrbtr_arr
+                if "DMBTR" in child_df.columns:
+                    child_df["DMBTR"] = wrbtr_arr
         elif is_vbap:
             for k in ["MANDT", "VBELN"]:
                 if k in parent_subset.columns:
@@ -207,17 +231,6 @@ class DataSynthesizer:
                     if fk.ref_field in parent_subset.columns and fk.field in child_df.columns:
                         child_df[fk.field] = parent_subset[fk.ref_field]
 
-            # Candidate header identifier columns to cascade
-            HEADER_KEY_CANDIDATES = {
-                "MANDT", "BUKRS", "BELNR", "GJAHR", "VBELN", "EBELN", "TKNUM",
-                "MBLNR", "AUFNR", "KUNNR", "LIFNR", "ID", "ORDER_ID", "DOC_ID", "HEADER_ID"
-            }
-            PROTECTED_ITEM_COLS = {
-                "NETWR", "WRBTR", "DMBTR", "MENGE", "KWMENG", "LFIMG", "POSNR", "BUZEI",
-                "EBELP", "ZEILE", "MATNR", "ARKTX", "WERKS", "LGORT", "SHKZG", "ERDAT", "AEDAT",
-                "STATUS", "DESCRIPTION", "DESC", "COMMENT", "COMMENTS", "NOTE", "NOTES",
-                "PRICE", "UNIT_PRICE", "TOTAL", "LINE_TOTAL"
-            }
             for col in parent_subset.columns:
                 is_candidate_key = (
                     col in HEADER_KEY_CANDIDATES
@@ -337,11 +350,12 @@ class DataSynthesizer:
             return np.array([f"{((i % 5) + 1):0{length}d}" for i in range(row_count)])
 
         # 8. Dates: Strict SAP date fields (prevent substring collisions like MANDAT, DATA, CANDIDATE) (DEF-09)
-        elif ((dtype == "DATS" or bool(re.search(r"(?:_DAT$|_DATE$|^[A-Z0-9]{0,3}DAT[A-Z0-9]?$|^[A-Z0-9]{0,3}DT$|ERDAT|AEDAT|BLDAT|BUDAT|WADAT|FKDAT|AUDAT|BEDAT|CPUDT)", field_name)))
+        elif ((dtype == "DATS" or bool(SAP_DATE_REGEX.search(field_name)))
               and field_name not in ("MANDAT", "DATA", "CANDIDATE", "METADATA", "STAT")):
-            base_ts = pd.Timestamp.now()
             days_offset = self.np_rng.integers(0, 90, size=row_count)
-            return np.array([(base_ts - pd.Timedelta(days=int(d))).strftime("%Y%m%d") for d in days_offset])
+            base_dt = np.datetime64("today")
+            dates = base_dt - days_offset.astype("timedelta64[D]")
+            return np.char.replace(dates.astype("U10"), "-", "")
 
         # 9. Times: Universal match for ANY SAP time field
         elif "ZET" in field_name or "TIM" in field_name or "UHR" in field_name or field_name.endswith("TM") or dtype == "TIMS":

@@ -99,9 +99,14 @@ class ReferentialVault:
             if candidate and candidate not in self._reverse_map[domain_key]:
                 return candidate
 
-        # If collision occurs repeatedly, append deterministic suffix
+        # If collision occurs repeatedly, append deterministic suffix with collision resolution
         base_hash = hashlib.sha256(f"{self.salt}_{orig_str}".encode()).hexdigest()[:6]
-        candidate = f"{generator_func(orig_str)} #{base_hash}"
+        base_candidate = generator_func(orig_str)
+        candidate = f"{base_candidate} #{base_hash}"
+        counter = 1
+        while candidate in self._reverse_map[domain_key]:
+            candidate = f"{base_candidate} #{base_hash}-{counter}"
+            counter += 1
         return candidate
 
     def get_stats(self, domain: str) -> Dict[str, Any]:

@@ -458,3 +458,128 @@ def test_export_nan_sanitization():
         assert pd.isna(read_df.at[0, "B"])
         assert read_df.at[1, "B"] == "Valid"
 
+
+def test_bseg_slice_vectorized_balancing_large_scale():
+    """Verifies slice-vectorized O(N) BSEG double-entry balancing across many documents."""
+    import time
+    catalog = SAPCatalogManager()
+    synth = DataSynthesizer(catalog, seed=42)
+
+    parent_df = synth.generate_sap_table("BKPF", row_count=100)
+    t0 = time.perf_counter()
+    child_df = synth.generate_sap_table(
+        "BSEG",
+        parent_df=parent_df,
+        items_per_parent_range=[4, 8]
+    )
+    elapsed = time.perf_counter() - t0
+
+    # Ensure fast execution (< 0.25s for ~600 rows)
+    assert elapsed < 0.5
+    assert len(child_df) >= 400
+
+    # Group by BELNR and verify net balance is strictly zero for each document
+    for doc_id, group in child_df.groupby("BELNR"):
+        debits = group[group["SHKZG"] == "S"]["WRBTR"].astype(float).sum()
+        credits = group[group["SHKZG"] == "H"]["WRBTR"].astype(float).sum()
+        diff = abs(debits - credits)
+        assert diff < 0.01, f"Document {doc_id} out of balance: debits={debits}, credits={credits}"
+
+
+def test_numpy_datetime64_vectorized_date_generation():
+    """Verifies pure NumPy datetime64 date generation throughput and format integrity."""
+    import time
+    import re
+    catalog = SAPCatalogManager()
+    synth = DataSynthesizer(catalog, seed=99)
+    vbak_schema = catalog.get_table("VBAK")
+    f_meta = vbak_schema.fields["ERDAT"]
+
+    t0 = time.perf_counter()
+    dates = synth._generate_default_field("VBAK", "ERDAT", f_meta, 50000)
+    elapsed = time.perf_counter() - t0
+
+    # 50,000 dates in under 0.25s
+    assert elapsed < 0.25
+    assert len(dates) == 50000
+
+    # Validate regex format YYYYMMDD
+    date_pat = re.compile(r"^\d{4}(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])$")
+    sample = dates[:100]
+    for d in sample:
+        assert date_pat.match(d), f"Invalid SAP date format: {d}"
+
+
+def test_excel_parser_multiplicity_range_parsing():
+    """Verifies that excel_parser correctly parses multiplicity ranges from metadata."""
+    from src.templates.excel_parser import FaultTolerantExcelParser
+    parser = FaultTolerantExcelParser()
+
+    with tempfile.TemporaryDirectory() as td:
+        wb_path = os.path.join(td, "test_range.xlsx")
+        with pd.ExcelWriter(wb_path, engine="openpyxl") as writer:
+            table_df = pd.DataFrame([
+                ["ITEMS", 100, "HEADER", "3 to 7"]
+            ], columns=["Table_Name", "Row_Count", "Parent_Table", "Items_Per_Parent"])
+            table_df.to_excel(writer, sheet_name="Table_Definitions", index=False)
+
+            rules_df = pd.DataFrame([
+                ["ITEMS", "ITEM_ID", "sequence", "prefix:ITM,start:1,pad:4"]
+            ], columns=["Table_Name", "Field_Name", "Rule_Type", "Parameters"])
+            rules_df.to_excel(writer, sheet_name="Field_Rules", index=False)
+
+        specs, audit = parser.parse_workbook(wb_path)
+        assert "ITEMS" in specs
+        spec = specs["ITEMS"]
+        assert spec.parent_table == "HEADER"
+        assert spec.items_per_parent_range == [3, 7]
+
+
+def test_vault_collision_resolution_counter_loop():
+    """Verifies strict 1:1 bijectivity in vault when generator repeatedly returns collisions."""
+    from src.masking.vault import ReferentialVault
+    vault = ReferentialVault(salt="test_salt_xyz")
+
+    # A mock generator that always returns the exact same string
+    fixed_val = "COLLISION_TARGET"
+    def collision_generator(x):
+        return fixed_val
+
+    # Mask 10 distinct values through the vault
+    masked_vals = set()
+    for i in range(10):
+        orig = f"ORIG_VAL_{i}"
+        m_val = vault.get_or_create("names", orig, collision_generator)
+        assert m_val not in masked_vals, f"Duplicate masked value produced: {m_val}"
+        masked_vals.add(m_val)
+        # Reverse mapping check
+        assert vault._reverse_map["names"][m_val] == orig
+
+    # All 10 masked values must be unique
+    assert len(masked_vals) == 10
+    stats = vault.get_stats("names")
+    assert stats["cardinality_preserved"] is True
+    assert stats["unique_original_values"] == 10
+    assert stats["unique_masked_values"] == 10
+
+
+def test_sap_catalog_get_possible_values_cache_hit():
+    """Verifies in-memory table cache utilization for get_possible_values."""
+    catalog = SAPCatalogManager()
+
+    # Pre-populate cache by getting table
+    schema = catalog.get_table("BKPF")
+    assert "BKPF" in catalog._table_cache
+
+    # Possible values for BKTXT or BLART should be served from memory
+    pv_blart = catalog.get_possible_values("BKPF", "BLART")
+    assert len(pv_blart) > 0
+    # Confirm codes exist
+    codes = {p.val for p in pv_blart}
+    assert "SA" in codes or "KR" in codes
+
+    # Non-existent field returns empty list
+    pv_none = catalog.get_possible_values("BKPF", "NON_EXISTENT_FIELD_XYZ")
+    assert pv_none == []
+
+

@@ -126,12 +126,20 @@ class SAPCatalogManager:
 
     def get_possible_values(self, table_name: str, field_name: str) -> List[PossibleValue]:
         """Returns allowed domain codes and business meanings for a field."""
+        norm_table = table_name.strip().upper()
+        norm_field = field_name.strip().upper()
+        if norm_table in self._table_cache:
+            schema = self._table_cache[norm_table]
+            for fname, fmeta in schema.fields.items():
+                if fname.upper() == norm_field:
+                    return fmeta.possible_values
+
         with self._get_conn() as conn:
             cur = conn.cursor()
             cur.execute("""
                 SELECT val, description FROM possible_values
                 WHERE UPPER(table_name) = ? AND UPPER(field_name) = ?
-            """, (table_name.strip().upper(), field_name.strip().upper()))
+            """, (norm_table, norm_field))
             return [PossibleValue(val=r["val"], desc=r["description"] or "") for r in cur.fetchall()]
 
     def search(self, query: str, limit: int = 50) -> List[Dict[str, Any]]:

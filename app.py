@@ -61,8 +61,13 @@ def export_dataframes_to_excel(dfs: dict, output_path: str):
         for t_name, df_out in dfs.items():
             ws = wb.create_sheet(title=str(t_name)[:31])
             ws.append(list(df_out.columns))
-            for row in df_out.itertuples(index=False, name=None):
-                ws.append([None if pd.isna(x) else x for x in row])
+            has_nans = df_out.isna().values.any()
+            if has_nans:
+                for row in df_out.itertuples(index=False, name=None):
+                    ws.append([None if pd.isna(x) else x for x in row])
+            else:
+                for row in df_out.itertuples(index=False, name=None):
+                    ws.append(list(row))
         wb.save(output_path)
     else:
         with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
@@ -445,7 +450,7 @@ def main_page(client: Client):
                                         ]
                                         ui.aggrid({
                                             "columnDefs": col_defs,
-                                            "rowData": p_df.to_dict("records"),
+                                            "rowData": p_df.fillna("").to_dict("records"),
                                             "defaultColDef": {"resizable": True, "minWidth": 140, "sortable": True, "filter": True},
                                             "pagination": False
                                         }).classes("w-full h-72 ag-theme-alpine-dark")
@@ -481,7 +486,7 @@ def main_page(client: Client):
                                 col_defs = [{"headerName": col, "field": col, "minWidth": 140, "sortable": True, "filter": True, "resizable": True} for col in p_df.columns]
                                 ui.aggrid({
                                     "columnDefs": col_defs,
-                                    "rowData": p_df.to_dict("records"),
+                                    "rowData": p_df.fillna("").to_dict("records"),
                                     "defaultColDef": {"resizable": True, "minWidth": 140}
                                 }).classes("w-full h-[62vh] ag-theme-alpine-dark")
                 fs_dlg.open()
@@ -689,7 +694,7 @@ def main_page(client: Client):
                                         ui.label("Original (Before)").classes("text-[11px] font-bold text-red-400 uppercase")
                                         ui.aggrid({
                                             "columnDefs": [{"headerName": c, "field": c, "minWidth": 120} for c in pair["original"].columns],
-                                            "rowData": pair["original"].to_dict("records"),
+                                            "rowData": pair["original"].fillna("").to_dict("records"),
                                             "defaultColDef": {"resizable": True, "minWidth": 120}
                                         }).classes("h-48 w-full ag-theme-alpine-dark")
 
@@ -697,7 +702,7 @@ def main_page(client: Client):
                                         ui.label("Masked (After)").classes("text-[11px] font-bold text-emerald-400 uppercase")
                                         ui.aggrid({
                                             "columnDefs": [{"headerName": c, "field": c, "minWidth": 120} for c in pair["masked"].columns],
-                                            "rowData": pair["masked"].to_dict("records"),
+                                            "rowData": pair["masked"].fillna("").to_dict("records"),
                                             "defaultColDef": {"resizable": True, "minWidth": 120}
                                         }).classes("h-48 w-full ag-theme-alpine-dark")
 
@@ -789,6 +794,11 @@ def main_page(client: Client):
                                                 ui.element("td").classes("px-3 py-1.5 font-mono text-slate-400").text = f.data_type
                                                 ui.element("td").classes("px-3 py-1.5 font-mono text-slate-400").text = str(f.length)
                                                 ui.element("td").classes("px-3 py-1.5 text-slate-300").text = f.description or ""
+                                        if len(f_list) > 30:
+                                            with ui.element("tr").classes("bg-slate-900/40 text-slate-500 italic"):
+                                                more_td = ui.element("td").classes("px-3 py-2 text-center")
+                                                more_td.props("colspan=4")
+                                                more_td.text = f"... and {len(f_list) - 30} more fields defined in catalog"
 
                 search_timer = None
                 def debounced_search():

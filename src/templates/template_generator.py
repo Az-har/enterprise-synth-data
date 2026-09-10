@@ -131,5 +131,5 @@ class ExcelTemplateBuilder:
                 val_str = str(cell.value or "")
                 max_len = max(max_len, len(val_str))
 
-            ws.column_dimensions[col_letter].width = max(max_len + 4, 15)
+            ws.column_dimensions[col_letter].width = min(max(max_len + 4, 15), 50)
         ws.row_dimensions[1].height = 28
