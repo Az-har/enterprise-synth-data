@@ -105,7 +105,7 @@ class FaultTolerantExcelParser:
                                 else:
                                     try:
                                         row_cnt = int(float(val_str))
-                                    except Exception:
+                                    except (ValueError, TypeError):
                                         digits = re.sub(r"[^\d]", "", val_str.split(".")[0])
                                         row_cnt = int(digits) if digits else 100
 
@@ -259,7 +259,7 @@ class FaultTolerantExcelParser:
                 df.columns = df_raw.iloc[0].tolist()
 
             return self._normalize_dataframe_headers(df)
-        except Exception:
+        except (ValueError, TypeError, IndexError, KeyError):
             return pd.DataFrame()
 
     def _find_sheet(self, sheets: List[str], candidates: List[str]) -> Optional[str]:
@@ -307,7 +307,7 @@ class FaultTolerantExcelParser:
                             # Support percentage strings (e.g. '70%' -> 70.0)
                             w_clean = w.strip().replace("%", "")
                             weight = float(w_clean)
-                        except Exception:
+                        except (ValueError, TypeError):
                             weight = 1.0
                         if val_clean:
                             choices.append(val_clean)

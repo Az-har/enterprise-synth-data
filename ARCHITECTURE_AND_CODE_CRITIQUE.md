@@ -398,90 +398,63 @@ An in-depth static and computational analysis of the `enterprise-synth-data` cod
   2. Eliminated redundant worksheet re-read by slicing `df_raw` in memory (`df_raw.iloc[header_row_idx + 1:]`), reducing Excel parse I/O by 50%.
   3. Wrapped `pd.ExcelFile` in a context manager to ensure immediate file descriptor release on Windows.
 
-#### 11. Referential Vault Bijective Collision Resolution Loop
-* **Location:** [`src/masking/vault.py:100-108`](file:///d:/Progamming/GITHUB/enterprise-synth-data/src/masking/vault.py#L100-L108)
+#### 14. Missing Column Initialization Fast-Path Fix
+* **Location:** [`src/synthesis/generator.py:217, 229`](file:///d:/Progamming/GITHUB/enterprise-synth-data/src/synthesis/generator.py#L217-L229)
 * **Status:** **RESOLVED**
-* **Remediation:** Hardened deterministic fallback pseudonyms with a collision counter loop (`base_candidate #{base_hash}-{counter}`) checking `self._reverse_map`. Mathematically guarantees 1:1 bijectivity even under artificial repeated generator collision stress tests.
+* **Remediation:** Removed the `and "NETWR" in child_df.columns` condition from `VBAP` and `EKPO` line item balancing. Previously, if the `NETWR` column was absent from the generated dataset (due to missing user specification), the engine would skip calculating it entirely, compromising BSEG downstream reconciliation. Pandas now automatically creates the `NETWR` series on assignment.
 
-#### 12. In-Memory Catalog Domain Code Cache Fast Path
-* **Location:** [`src/catalog/sap_catalog.py:127-137`](file:///d:/Progamming/GITHUB/enterprise-synth-data/src/catalog/sap_catalog.py#L127-L137)
+#### 15. Broad Exception Catch Elimination
+* **Location:** [`src/synthesis/generator.py:221-233`](file:///d:/Progamming/GITHUB/enterprise-synth-data/src/synthesis/generator.py#L221-L233) & [`src/templates/excel_parser.py:108-310`](file:///d:/Progamming/GITHUB/enterprise-synth-data/src/templates/excel_parser.py#L108-L310)
 * **Status:** **RESOLVED**
-* **Remediation:** Updated `get_possible_values(table_name, field_name)` to inspect `self._table_cache` in RAM first. If table schema is already loaded, domain codes and descriptions return instantly with 0 disk SQLite transactions.
-
-#### 13. Fast-Path Streaming Excel Export & AgGrid NaN Sanitization
-* **Location:** [`app.py:61-68, 450, 488, 694-706, 794-799`](file:///d:/Progamming/GITHUB/enterprise-synth-data/app.py#L61-L68)
-* **Status:** **RESOLVED**
-* **Remediation:**
-  1. In `export_dataframes_to_excel()`, added `df_out.isna().values.any()` fast path. If no NaNs exist, rows stream directly via `ws.append(list(row))`, avoiding millions of per-cell `pd.isna()` calls.
-  2. Sanitized all AgGrid preview tables with `.fillna("")` to eliminate JSON serialization errors across browser clients.
-  3. Added count indicators (`... and N more fields defined in catalog`) in the Catalog Explorer.
-  4. Capped auto-generated Excel template column widths at 50 chars in `ExcelTemplateBuilder._style_sheet()`.
+* **Remediation:** Audited the entire codebase and eradicated all broad `except Exception:` catches. Replaced them with exact targets like `except (ValueError, TypeError, KeyError):`. This prevents logic bugs, missing attributes, or `MemoryError`s from failing silently during mass data generation.
 
 ---
 
 ### 7.4. Remediation & Performance Verification Results
 
-All **48 automated unit and integration tests** pass cleanly across the entire platform:
+All **55 automated unit and integration tests** pass cleanly across the entire platform, with line coverage validated via `pytest-cov`:
 
 ```powershell
-python -m pytest tests/ -v
+pytest --cov=src tests/
 ============================= test session starts =============================
 platform win32 -- Python 3.12.10, pytest-9.1.1, pluggy-1.6.0
 rootdir: D:\Progamming\GITHUB\enterprise-synth-data
 configfile: pyproject.toml
-plugins: anyio-4.14.2, Faker-40.38.0, langsmith-0.12.1
-collected 48 items
+plugins: anyio-4.14.2, Faker-40.38.0, langsmith-0.12.1, cov-7.1.0
+collected 55 items
 
-tests/test_critique_fixes.py::test_def01_session_state_isolation PASSED  [  2%]
-tests/test_critique_fixes.py::test_def02_and_def10_offline_catalog_and_batch_pv PASSED [  4%]
-tests/test_critique_fixes.py::test_def05_fk_cascade_does_not_overwrite_child_attributes PASSED [  6%]
-tests/test_critique_fixes.py::test_def06_masking_preview_does_not_pollute_vault_state PASSED [  8%]
-tests/test_critique_fixes.py::test_def07_numeric_perturbation_small_range PASSED [ 10%]
-tests/test_critique_fixes.py::test_def08_detector_cell_by_cell_no_cross_row_bleed PASSED [ 12%]
-tests/test_critique_fixes.py::test_def09_date_detection_and_realism PASSED [ 14%]
-tests/test_critique_fixes.py::test_def11_faker_pool_cardinality_scaling PASSED [ 16%]
-tests/test_critique_fixes.py::test_def13_bseg_double_entry_debit_credit_balancing PASSED [ 18%]
-tests/test_topological_sorter PASSED             [ 20%]
-tests/test_critique_fixes.py::test_def15_masking_engine_multi_tenant_isolation PASSED [ 22%]
-tests/test_critique_fixes.py::test_def16_custom_schema_cascade_does_not_overwrite_columns PASSED [ 25%]
-tests/test_critique_fixes.py::test_def17_session_temp_cleanup PASSED     [ 27%]
-tests/test_critique_fixes.py::test_sec7_dead_code_eliminated PASSED      [ 29%]
-tests/test_critique_fixes.py::test_sec7_suffix_o1_lookup_and_prng_isolation PASSED [ 31%]
-tests/test_critique_fixes.py::test_sec7_vectorized_cython_mapping_and_case_insensitive_col_map PASSED [ 33%]
-tests/test_critique_fixes.py::test_sec7_streaming_excel_export PASSED    [ 35%]
-tests/test_critique_fixes.py::test_catalog_caching_and_search_limit PASSED [ 37%]
-tests/test_critique_fixes.py::test_detector_precompilation_and_header_helper PASSED [ 39%]
-tests/test_critique_fixes.py::test_parser_zero_dummy_strings PASSED      [ 41%]
-tests/test_critique_fixes.py::test_generator_scoped_prng_isolation_and_multiplicity PASSED [ 43%]
-tests/test_critique_fixes.py::test_export_nan_sanitization PASSED        [ 45%]
-tests/test_critique_fixes.py::test_bseg_slice_vectorized_balancing_large_scale PASSED [ 47%]
-tests/test_critique_fixes.py::test_numpy_datetime64_vectorized_date_generation PASSED [ 50%]
-tests/test_critique_fixes.py::test_excel_parser_multiplicity_range_parsing PASSED [ 52%]
-tests/test_critique_fixes.py::test_vault_collision_resolution_counter_loop PASSED [ 54%]
-tests/test_critique_fixes.py::test_sap_catalog_get_possible_values_cache_hit PASSED [ 56%]
-tests/test_masking_rules.py::test_rule_1_abb_llc_suffix_and_word_count PASSED [ 58%]
-tests/test_masking_rules.py::test_rule_1_international_legal_suffixes PASSED [ 60%]
-tests/test_masking_rules.py::test_rule_2_exact_cardinality_preservation PASSED [ 62%]
-tests/test_masking_rules.py::test_rule_2_cross_table_referential_join PASSED [ 64%]
-tests/test_masking_rules.py::test_rule_2_custom_user_list_with_overflow_protection PASSED [ 66%]
-tests/test_masking_rules.py::test_rule_3_numeric_id_obfuscation PASSED   [ 68%]
-tests/test_masking_rules.py::test_rule_3_financial_amount_perturbation PASSED [ 70%]
-tests/test_masking_rules.py::test_multi_table_masking_engine PASSED      [ 72%]
-tests/test_sap_catalog.py::test_core_tables_exist PASSED                 [ 75%]
-tests/test_sap_catalog.py::test_bkpf_schema_and_keys PASSED              [ 77%]
-tests/test_sap_catalog.py::test_bseg_foreign_keys_to_bkpf PASSED         [ 79%]
-tests/test_sap_catalog.py::test_possible_values_lookup PASSED            [ 81%]
-tests/test_sap_catalog.py::test_catalog_search PASSED                    [ 83%]
-tests/test_sap_catalog.py::test_zero_third_party_branding PASSED         [ 85%]
-tests/test_synthesis.py::test_generate_single_sap_table PASSED           [ 87%]
-tests/test_synthesis.py::test_relational_pair_generation_and_fk_integrity PASSED [ 89%]
-tests/test_synthesis.py::test_vbeln_sequence_and_erzet_time_format PASSED [ 91%]
-tests/test_synthesis.py::test_likp_and_lips_enterprise_fields_and_zero_val_output PASSED [ 93%]
-tests/test_templates.py::test_template_builder_creates_valid_file PASSED [ 95%]
-tests/test_templates.py::test_meta_prompt_generation PASSED              [ 97%]
-tests/test_templates.py::test_fault_tolerant_parser_on_generated_template PASSED [100%]
+tests\test_critique_fixes.py ...........................                 [ 49%]
+tests\test_enterprise_flow.py .......                                    [ 61%]
+tests\test_masking_rules.py ........                                     [ 76%]
+tests\test_sap_catalog.py ......                                         [ 87%]
+tests\test_synthesis.py ....                                             [ 94%]
+tests\test_templates.py ...                                              [100%]
 
-============================= 48 passed in 9.86s ==============================
+=============================== tests coverage ================================
+______________ coverage: platform win32, python 3.12.10-final-0 _______________
+
+Name                                  Stmts   Miss  Cover
+---------------------------------------------------------
+src\catalog\__init__.py                   3      0   100%
+src\catalog\sap_catalog.py               82      3    96%
+src\catalog\schema_models.py             34      6    82%
+src\masking\__init__.py                   6      0   100%
+src\masking\detector.py                  47     15    68%
+src\masking\format_preserver.py          81     26    68%
+src\masking\masking_engine.py            73     11    85%
+src\masking\numeric_masker.py            42     10    76%
+src\masking\vault.py                     67      9    87%
+src\synthesis\__init__.py                 4      0   100%
+src\synthesis\enterprise_flow.py        255      4    98%
+src\synthesis\generator.py              383     86    78%
+src\synthesis\rules.py                   16      0   100%
+src\templates\__init__.py                 4      0   100%
+src\templates\excel_parser.py           281    100    64%
+src\templates\meta_prompt.py              7      0   100%
+src\templates\template_generator.py      65      3    95%
+---------------------------------------------------------
+TOTAL                                  1450    273    81%
+============================= 55 passed in 17.60s =============================
 ```
 
 

@@ -214,11 +214,25 @@ class DataSynthesizer:
                 if k in parent_subset.columns:
                     child_df[k] = parent_subset[k]
             child_df["POSNR"] = [f"{idx * 10:06d}" for idx in line_numbers]
+            if "NETPR" in child_df.columns and "KWMENG" in child_df.columns:
+                try:
+                    kw = pd.to_numeric(child_df["KWMENG"], errors="coerce").fillna(10.0)
+                    pr = pd.to_numeric(child_df["NETPR"], errors="coerce").fillna(50.0)
+                    child_df["NETWR"] = np.round(kw * pr, 2)
+                except (ValueError, TypeError, KeyError):
+                    pass
         elif is_ekpo:
             for k in ["MANDT", "EBELN"]:
                 if k in parent_subset.columns:
                     child_df[k] = parent_subset[k]
             child_df["EBELP"] = [f"{idx * 10:05d}" for idx in line_numbers]
+            if "NETPR" in child_df.columns and "MENGE" in child_df.columns:
+                try:
+                    mg = pd.to_numeric(child_df["MENGE"], errors="coerce").fillna(10.0)
+                    pr = pd.to_numeric(child_df["NETPR"], errors="coerce").fillna(50.0)
+                    child_df["NETWR"] = np.round(mg * pr, 2)
+                except (ValueError, TypeError, KeyError):
+                    pass
         elif is_lips or is_vbrp:
             for k in ["MANDT", "VBELN"]:
                 if k in parent_subset.columns:
@@ -545,3 +559,37 @@ class DataSynthesizer:
             items_per_parent_range=items_per_parent_range
         )
         return {parent_table: parent_df, child_table: child_df}
+
+    def generate_enterprise_flow(
+        self,
+        config: Optional[Any] = None,
+        num_orders: int = 1000,
+        num_customers: int = 100,
+        num_materials: int = 25,
+        num_carriers: int = 10,
+        disruption_rate: float = 0.12,
+        seed: Optional[int] = None
+    ) -> Dict[str, pd.DataFrame]:
+        """
+        Generates a complete enterprise Order-to-Cash (O2C) and FI/CO lifecycle
+        adhering to all 6 Invariant Axioms:
+        - Master Referential Closure (KNA1, KNVV, MARA, LFA1)
+        - Arrow-of-Time Chronological Sequencing (VBAK, VBAP, LIKP, LIPS, VTTK, VTTP, VBRK, VBRP, BKPF, BSEG)
+        - Mathematical Line-to-Header Reconciliation
+        - Process Document Flow Reference Preservation
+        - Geographic & Multimodal Routing Realism
+        - Statistical Pareto & Controlled Disruption Distributions
+        """
+        from .enterprise_flow import EnterpriseFlowSynthesizer, EnterpriseFlowConfig
+
+        if config is None:
+            config = EnterpriseFlowConfig(
+                num_customers=num_customers,
+                num_materials=num_materials,
+                num_carriers=num_carriers,
+                num_orders=num_orders,
+                disruption_rate=disruption_rate,
+                seed=seed if seed is not None else self.seed
+            )
+        flow_synthesizer = EnterpriseFlowSynthesizer(config)
+        return flow_synthesizer.generate_all()
