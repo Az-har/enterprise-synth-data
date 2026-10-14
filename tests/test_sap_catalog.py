@@ -65,3 +65,10 @@ def test_zero_third_party_branding(catalog):
                 row_str = " ".join([str(val) for val in row if val is not None]).lower()
                 assert "leanx" not in row_str, f"Forbidden third-party brand found in {table}: {row_str}"
                 assert "leanix" not in row_str, f"Forbidden third-party brand found in {table}: {row_str}"
+
+
+def test_possible_values_unindexed_table(catalog):
+    """Verifies get_possible_values returns empty list without AttributeError when table is cached as None."""
+    assert catalog.get_table("DEFINITELY_NOT_EXISTING_ABC") is None
+    vals = catalog.get_possible_values("DEFINITELY_NOT_EXISTING_ABC", "ANY_FIELD")
+    assert vals == []

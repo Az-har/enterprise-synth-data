@@ -288,6 +288,64 @@ class FaultTolerantExcelParser:
                     return col
         return None
 
+    def _match_sap_table_from_columns(self, columns: List[str]) -> Optional[str]:
+        """Matches a list of column names to the most probable core SAP table."""
+        if not columns:
+            return None
+        clean_cols = [str(c).strip().upper() for c in columns if c and str(c).strip()]
+        if not clean_cols:
+            return None
+
+        # Check core known SAP tables first
+        core_candidates = ["VBAK", "VBAP", "BKPF", "BSEG", "LIKP", "LIPS", "EKKO", "EKPO", "VBRK", "VBRP", "MARA", "KNA1", "LFA1"]
+        best_table = None
+        max_matches = 0
+
+        for tbl_name in core_candidates:
+            tbl_schema = self.catalog.get_table(tbl_name)
+            if tbl_schema:
+                matches = sum(1 for c in clean_cols if c in tbl_schema.fields)
+                if matches > max_matches:
+                    max_matches = matches
+                    best_table = tbl_name
+
+        if max_matches >= 2:
+            return best_table
+        return None
+
+    def _infer_rule_for_column(self, table_name: str, col_name: str) -> FieldRule:
+        """Infers an appropriate synthesis rule for a column based on catalog metadata or name semantics."""
+        clean_col = col_name.strip().upper()
+        tbl_schema = self.catalog.get_table(table_name)
+        if tbl_schema and clean_col in tbl_schema.fields:
+            field_meta = tbl_schema.fields[clean_col]
+            if field_meta.possible_values:
+                choices = [pv.val for pv in field_meta.possible_values[:15] if pv.val]
+                if choices:
+                    return FieldRule(field_name=clean_col, rule_type="choice", parameters={"choices": choices})
+
+            dtype = field_meta.data_type.upper()
+            if dtype in ("CURR", "DEC", "QUAN"):
+                return FieldRule(field_name=clean_col, rule_type="range", parameters={"min": 10.0, "max": 5000.0, "decimals": field_meta.decimals or 2})
+            elif dtype == "NUMC":
+                return FieldRule(field_name=clean_col, rule_type="sequence", parameters={"start": 1000, "pad": field_meta.length})
+            elif dtype in ("INT1", "INT2", "INT4", "INT8"):
+                return FieldRule(field_name=clean_col, rule_type="range", parameters={"min": 1, "max": 100, "decimals": 0})
+
+        # Name-based heuristic fallback
+        if any(kw in clean_col for kw in ("NAME", "COMPANY", "VENDOR", "CUSTOMER", "CUST")):
+            return FieldRule(field_name=clean_col, rule_type="faker", parameters={"provider": "company"})
+        elif any(kw in clean_col for kw in ("EMAIL", "MAIL")):
+            return FieldRule(field_name=clean_col, rule_type="faker", parameters={"provider": "email"})
+        elif any(kw in clean_col for kw in ("CITY", "ORT")):
+            return FieldRule(field_name=clean_col, rule_type="faker", parameters={"provider": "city"})
+        elif any(kw in clean_col for kw in ("AMOUNT", "PRICE", "WRBTR", "DMBTR", "NETWR", "TOTAL", "COST")):
+            return FieldRule(field_name=clean_col, rule_type="range", parameters={"min": 10.0, "max": 2500.0, "decimals": 2})
+        elif any(clean_col.endswith(s) for s in ("_ID", "_NR", "_NUM", "ID", "NUM")) or clean_col in ("BELNR", "VBELN", "EBELN", "KUNNR", "LIFNR"):
+            return FieldRule(field_name=clean_col, rule_type="sequence", parameters={"start": 10000000, "pad": 10})
+        else:
+            return FieldRule(field_name=clean_col, rule_type="choice", parameters={"choices": ["STD_1", "STD_2"]})
+
     def _parse_rule_string(self, field_name: str, rule_type: str, params: str) -> FieldRule:
         """Parses flexible parameter strings with ultra-fault-tolerant syntax handling."""
         parsed_params = {}

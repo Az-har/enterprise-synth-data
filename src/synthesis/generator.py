@@ -96,6 +96,18 @@ class DataSynthesizer:
             else:
                 fields_dict["ID"] = FieldMeta(name="ID", description="Identifier", data_type="CHAR", length=10)
 
+            # If parent_df is provided, ensure candidate key columns from parent are represented in schema
+            if parent_df is not None and not parent_df.empty:
+                for p_col in parent_df.columns:
+                    is_cand = (
+                        p_col in HEADER_KEY_CANDIDATES
+                        or p_col.endswith("_ID")
+                        or p_col.endswith("_NR")
+                        or p_col.endswith("_NUM")
+                    )
+                    if is_cand and p_col not in PROTECTED_ITEM_COLS and p_col not in fields_dict:
+                        fields_dict[p_col] = FieldMeta(name=p_col, description=f"Foreign Key {p_col}", data_type="CHAR", length=35)
+
             schema = TableSchema(
                 name=table_name,
                 description=f"Entity {table_name}",

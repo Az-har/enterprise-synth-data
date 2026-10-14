@@ -398,6 +398,25 @@ An in-depth static and computational analysis of the `enterprise-synth-data` cod
   2. Eliminated redundant worksheet re-read by slicing `df_raw` in memory (`df_raw.iloc[header_row_idx + 1:]`), reducing Excel parse I/O by 50%.
   3. Wrapped `pd.ExcelFile` in a context manager to ensure immediate file descriptor release on Windows.
 
+#### 11. Referential Vault Bijective Collision Resolution Loop
+* **Location:** [`src/masking/vault.py:100-108`](file:///d:/Progamming/GITHUB/enterprise-synth-data/src/masking/vault.py#L100-L108)
+* **Status:** **RESOLVED**
+* **Remediation:** Hardened deterministic fallback pseudonyms with a collision counter loop (`base_candidate #{base_hash}-{counter}`) checking `self._reverse_map`. Mathematically guarantees 1:1 bijectivity even under artificial repeated generator collision stress tests.
+
+#### 12. In-Memory Catalog Domain Code Cache Fast Path
+* **Location:** [`src/catalog/sap_catalog.py:127-137`](file:///d:/Progamming/GITHUB/enterprise-synth-data/src/catalog/sap_catalog.py#L127-L137)
+* **Status:** **RESOLVED**
+* **Remediation:** Updated `get_possible_values(table_name, field_name)` to inspect `self._table_cache` in RAM first. If table schema is already loaded, domain codes and descriptions return instantly with 0 disk SQLite transactions.
+
+#### 13. Fast-Path Streaming Excel Export & AgGrid NaN Sanitization
+* **Location:** [`app.py:61-68, 450, 488, 694-706, 794-799`](file:///d:/Progamming/GITHUB/enterprise-synth-data/app.py#L61-L68)
+* **Status:** **RESOLVED**
+* **Remediation:**
+  1. In `export_dataframes_to_excel()`, added `df_out.isna().values.any()` fast path. If no NaNs exist, rows stream directly via `ws.append(list(row))`, avoiding millions of per-cell `pd.isna()` calls.
+  2. Sanitized all AgGrid preview tables with `.fillna("")` to eliminate JSON serialization errors across browser clients.
+  3. Added count indicators (`... and N more fields defined in catalog`) in the Catalog Explorer.
+  4. Capped auto-generated Excel template column widths at 50 chars in `ExcelTemplateBuilder._style_sheet()`.
+
 #### 14. Missing Column Initialization Fast-Path Fix
 * **Location:** [`src/synthesis/generator.py:217, 229`](file:///d:/Progamming/GITHUB/enterprise-synth-data/src/synthesis/generator.py#L217-L229)
 * **Status:** **RESOLVED**
@@ -408,11 +427,26 @@ An in-depth static and computational analysis of the `enterprise-synth-data` cod
 * **Status:** **RESOLVED**
 * **Remediation:** Audited the entire codebase and eradicated all broad `except Exception:` catches. Replaced them with exact targets like `except (ValueError, TypeError, KeyError):`. This prevents logic bugs, missing attributes, or `MemoryError`s from failing silently during mass data generation.
 
+#### 16. Incomplete Sample Data Fallback & Rule Inference
+* **Location:** [`src/templates/excel_parser.py:214-225, 290-345`](file:///d:/Progamming/GITHUB/enterprise-synth-data/src/templates/excel_parser.py#L214-L225)
+* **Status:** **RESOLVED**
+* **Remediation:** Implemented `_match_sap_table_from_columns()` and `_infer_rule_for_column()`. Previously, dropping raw spreadsheets lacking `Table_Definitions` or `Field_Rules` sheets caused an `AttributeError` on missing methods. The parser now dynamically identifies matching SAP entities from column overlaps and infers appropriate sequence, range, faker, or choice rules.
+
+#### 17. Cached None Schema Guard in Catalog Domain Values
+* **Location:** [`src/catalog/sap_catalog.py:131-136`](file:///d:/Progamming/GITHUB/enterprise-synth-data/src/catalog/sap_catalog.py#L131-L136)
+* **Status:** **RESOLVED**
+* **Remediation:** Added a guard checking `schema is not None` when reading `_table_cache` in `get_possible_values()`. If an unindexed table was previously queried, `_table_cache[table_name]` stores `None`. The guard prevents an `AttributeError: 'NoneType' object has no attribute 'fields'` and returns an empty list cleanly.
+
+#### 18. Dynamic Schema Candidate Key Cascade for Custom Child Entities
+* **Location:** [`src/synthesis/generator.py:98-106, 260-268`](file:///d:/Progamming/GITHUB/enterprise-synth-data/src/synthesis/generator.py#L98-L106)
+* **Status:** **RESOLVED**
+* **Remediation:** Enhanced dynamic schema synthesis for custom relational schemas when `parent_df` is provided. Automatically includes candidate foreign keys (`*_ID`, `*_NR`, `*_NUM`, `ID`) from the parent entity in the child table's schema, ensuring relational linkage even if the user omitted explicit rules for the foreign key column.
+
 ---
 
 ### 7.4. Remediation & Performance Verification Results
 
-All **55 automated unit and integration tests** pass cleanly across the entire platform, with line coverage validated via `pytest-cov`:
+All **58 automated unit and integration tests** pass cleanly across the entire platform, with line coverage validated via `pytest-cov`:
 
 ```powershell
 pytest --cov=src tests/
@@ -421,14 +455,14 @@ platform win32 -- Python 3.12.10, pytest-9.1.1, pluggy-1.6.0
 rootdir: D:\Progamming\GITHUB\enterprise-synth-data
 configfile: pyproject.toml
 plugins: anyio-4.14.2, Faker-40.38.0, langsmith-0.12.1, cov-7.1.0
-collected 55 items
+collected 58 items
 
-tests\test_critique_fixes.py ...........................                 [ 49%]
-tests\test_enterprise_flow.py .......                                    [ 61%]
-tests\test_masking_rules.py ........                                     [ 76%]
-tests\test_sap_catalog.py ......                                         [ 87%]
-tests\test_synthesis.py ....                                             [ 94%]
-tests\test_templates.py ...                                              [100%]
+tests/test_critique_fixes.py ...........................                 [ 46%]
+tests/test_enterprise_flow.py .......                                    [ 58%]
+tests/test_masking_rules.py ........                                     [ 72%]
+tests/test_sap_catalog.py .......                                        [ 84%]
+tests/test_synthesis.py .....                                            [ 93%]
+tests/test_templates.py ....                                             [100%]
 
 =============================== tests coverage ================================
 ______________ coverage: platform win32, python 3.12.10-final-0 _______________
@@ -436,7 +470,7 @@ ______________ coverage: platform win32, python 3.12.10-final-0 _______________
 Name                                  Stmts   Miss  Cover
 ---------------------------------------------------------
 src\catalog\__init__.py                   3      0   100%
-src\catalog\sap_catalog.py               82      3    96%
+src\catalog\sap_catalog.py               84      3    96%
 src\catalog\schema_models.py             34      6    82%
 src\masking\__init__.py                   6      0   100%
 src\masking\detector.py                  47     15    68%
@@ -446,15 +480,15 @@ src\masking\numeric_masker.py            42     10    76%
 src\masking\vault.py                     67      9    87%
 src\synthesis\__init__.py                 4      0   100%
 src\synthesis\enterprise_flow.py        255      4    98%
-src\synthesis\generator.py              383     86    78%
+src\synthesis\generator.py              388     74    81%
 src\synthesis\rules.py                   16      0   100%
 src\templates\__init__.py                 4      0   100%
-src\templates\excel_parser.py           281    100    64%
+src\templates\excel_parser.py           327     80    76%
 src\templates\meta_prompt.py              7      0   100%
 src\templates\template_generator.py      65      3    95%
 ---------------------------------------------------------
-TOTAL                                  1450    273    81%
-============================= 55 passed in 17.60s =============================
+TOTAL                                  1503    241    84%
+============================= 58 passed in 17.73s =============================
 ```
 
 

@@ -130,9 +130,11 @@ class SAPCatalogManager:
         norm_field = field_name.strip().upper()
         if norm_table in self._table_cache:
             schema = self._table_cache[norm_table]
-            for fname, fmeta in schema.fields.items():
-                if fname.upper() == norm_field:
-                    return fmeta.possible_values
+            if schema is not None:
+                for fname, fmeta in schema.fields.items():
+                    if fname.upper() == norm_field:
+                        return fmeta.possible_values
+            return []
 
         with self._get_conn() as conn:
             cur = conn.cursor()

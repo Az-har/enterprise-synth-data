@@ -111,3 +111,33 @@ def test_likp_and_lips_enterprise_fields_and_zero_val_output(synthesizer):
     for m in df_lips["MATNR"]:
         assert len(str(m)) == 18 and str(m).isdigit()
 
+
+def test_custom_parent_child_candidate_key_cascade(synthesizer):
+    """Verifies that custom parent-child table generation cascades candidate keys without explicit rules."""
+    import pandas as pd
+    from src.synthesis.rules import FieldRule
+
+    df_parent = pd.DataFrame({
+        "ORDER_ID": ["ORD-001", "ORD-002", "ORD-003"],
+        "STATUS": ["SHIPPED", "OPEN", "CANCELLED"],
+        "CUSTOMER_ID": ["CUST-10", "CUST-20", "CUST-30"]
+    })
+
+    df_child = synthesizer.generate_sap_table(
+        "ORDER_ITEMS",
+        parent_df=df_parent,
+        items_per_parent_range=[2, 3],
+        custom_rules={
+            "PRICE": FieldRule(field_name="PRICE", rule_type="range", parameters={"min": 10.0, "max": 100.0, "decimals": 2})
+        }
+    )
+
+    assert len(df_child) >= 6
+    # Both ORDER_ID and CUSTOMER_ID must cascade as candidate keys
+    assert "ORDER_ID" in df_child.columns
+    assert "CUSTOMER_ID" in df_child.columns
+    assert set(df_child["ORDER_ID"]).issubset(set(df_parent["ORDER_ID"]))
+    assert set(df_child["CUSTOMER_ID"]).issubset(set(df_parent["CUSTOMER_ID"]))
+    # Non-candidate STATUS must not cascade into child
+    assert "STATUS" not in df_child.columns
+

@@ -55,3 +55,29 @@ def test_fault_tolerant_parser_on_generated_template(tmp_excel_path):
     assert bkpf_rules["BUKRS"].rule_type == "choice"
     assert "1000" in bkpf_rules["BUKRS"].parameters["choices"]
     assert bkpf_rules["BUKRS"].parameters["weights"][0] == 0.6
+
+
+def test_sample_data_fallback_and_inference(tmp_excel_path):
+    """Verifies that dropping raw tabular data without spec sheets auto-detects SAP tables and infers rules."""
+    import pandas as pd
+    df = pd.DataFrame({
+        "VBELN": ["10000000", "10000001"],
+        "ERDAT": ["20260101", "20260102"],
+        "AUART": ["OR", "OR"],
+        "NETWR": [1500.50, 2300.00]
+    })
+    with pd.ExcelWriter(tmp_excel_path, engine="openpyxl") as writer:
+        df.to_excel(writer, sheet_name="Sheet1", index=False)
+
+    parser = FaultTolerantExcelParser()
+    specs, audit = parser.parse_workbook(tmp_excel_path)
+
+    assert audit["valid"] is True
+    assert "VBAK" in specs, f"Expected VBAK to be detected from columns, got {specs.keys()}"
+    vbak_spec = specs["VBAK"]
+    assert "VBELN" in vbak_spec.rules
+    assert "AUART" in vbak_spec.rules
+    assert "NETWR" in vbak_spec.rules
+    assert vbak_spec.rules["VBELN"].rule_type == "sequence"
+    assert vbak_spec.rules["AUART"].rule_type == "choice"
+    assert vbak_spec.rules["NETWR"].rule_type == "range"
